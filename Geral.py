@@ -840,57 +840,59 @@ if st.session_state['df_geral'] is not None:
         termo_ativo = st.session_state['busca_termo_biblio']
         tipo_ativo = st.session_state['busca_tipo_biblio']
 
+        # --- ARQUITETURA ULTRARRÁPIDA: Grafo Global em Memória ---
+        # Usamos cache_resource porque grafos são objetos complexos de rede, não apenas dados tubulares.
+        @st.cache_resource 
+        def obter_grafo_global(df_dados):
+            import networkx as nx
+            G = nx.Graph()
+            colunas_necessarias = [c for c in [col_titulos, col_autores, col_paises, col_venue] if c is not None]
+            records = df_dados[colunas_necessarias].to_dict('records')
+            
+            for row in records:
+                doc_node = str(row.get(col_titulos, ''))
+                if not doc_node or doc_node == 'nan': continue
+                G.add_node(doc_node, type='Documento')
+                
+                if col_autores and pd.notna(row.get(col_autores)):
+                    for a in [x.strip() for x in str(row[col_autores]).split(';') if x.strip()]:
+                        G.add_node(a, type='Autor')
+                        G.add_edge(doc_node, a)
+                if col_paises and pd.notna(row.get(col_paises)):
+                    for p in [x.strip() for x in str(row[col_paises]).split(';') if x.strip()]:
+                        G.add_node(p, type='País')
+                        G.add_edge(doc_node, p)
+                if col_venue and pd.notna(row.get(col_venue)):
+                    venue = str(row[col_venue]).strip()
+                    G.add_node(venue, type='Venue')
+                    G.add_edge(doc_node, venue)
+            return G
+
         # 3. Construção do Perfil e Métricas SNA
         if termo_ativo:
             col_info, col_sna = st.columns([2, 1])
             
-            # --- FUNÇÃO INTERNA: Cálculo de SNA na Rede Heterogênea ---
-            # --- FUNÇÃO INTERNA OTIMIZADA: Cálculo de SNA na Rede Heterogênea ---
-            @st.cache_data
-            def calcular_sna_local(df_dados, termo, tipo):
+            # Recupera a rede global instantaneamente
+            grafo_global = obter_grafo_global(df)
+            
+            def calcular_sna_instantaneo(G, termo):
+                """Calcula métricas localizadas baseadas no Grafo Global pré-carregado."""
                 import networkx as nx
-                G = nx.Graph()
-                
-                # OTIMIZAÇÃO 1: Converter para lista de dicionários antes do loop
-                colunas_necessarias = [c for c in [col_titulos, col_autores, col_paises, col_venue] if c is not None]
-                records = df_dados[colunas_necessarias].to_dict('records')
-                
-                for row in records:
-                    doc_node = str(row.get(col_titulos, ''))
-                    if not doc_node or doc_node == 'nan': continue
-                    
-                    G.add_node(doc_node, type='Documento')
-                    
-                    # Conecta Autores
-                    if col_autores and pd.notna(row.get(col_autores)):
-                        for a in [x.strip() for x in str(row[col_autores]).split(';') if x.strip()]:
-                            G.add_node(a, type='Autor')
-                            G.add_edge(doc_node, a)
-                    # Conecta Países
-                    if col_paises and pd.notna(row.get(col_paises)):
-                        for p in [x.strip() for x in str(row[col_paises]).split(';') if x.strip()]:
-                            G.add_node(p, type='País')
-                            G.add_edge(doc_node, p)
-                    # Conecta Venue
-                    if col_venue and pd.notna(row.get(col_venue)):
-                        venue = str(row[col_venue]).strip()
-                        G.add_node(venue, type='Venue')
-                        G.add_edge(doc_node, venue)
-
                 if termo not in G: return None
                 
-                # OTIMIZAÇÃO 2: Limite de profundidade no Ego Graph e cálculo
                 grau_abs = G.degree(termo)
-                cent_grau = nx.degree_centrality(G).get(termo, 0)
+                # Cálculo de centralidade de grau isolado (super rápido: grau / nós possíveis)
+                total_nos = len(G)
+                cent_grau = grau_abs / (total_nos - 1) if total_nos > 1 else 0
                 
-                # Restringe a rede local a raio 1 para não calcular a base inteira
+                # Extrai apenas os vizinhos diretos (radius=1) para a intermediação, economizando processamento pesado
                 ego_net = nx.ego_graph(G, termo, radius=1) 
                 betw = nx.betweenness_centrality(ego_net).get(termo, 0)
                 clos = nx.closeness_centrality(ego_net).get(termo, 0)
                 
                 return {"Grau Absoluto": grau_abs, "Centralidade Grau": cent_grau, "Betweenness": betw, "Closeness": clos}
 
-            metricas_sna = calcular_sna_local(df, termo_ativo, tipo_ativo)
+            metricas_sna = calcular_sna_instantaneo(grafo_global, termo_ativo)
 
             # --- RENDERIZAÇÃO DO PERFIL (COLUNA ESQUERDA) ---
             with col_info:
@@ -983,7 +985,7 @@ if st.session_state['df_geral'] is not None:
         # =========================================================
         tab_hist, tab_nuvem, tab_similares = st.tabs(["📈 Evolução Histórica", "☁️ Lexicometria", "🔗 Itens Semelhantes"])
 
-        # Filtra os dados de forma robusta e protege contra valores vazios (None)
+        # Filtra os dados
         if not termo_ativo:
             subset_df = pd.DataFrame()
         elif tipo_ativo == "Documento": 
@@ -1001,13 +1003,11 @@ if st.session_state['df_geral'] is not None:
         with tab_hist:
             st.markdown(f"**Produção e Impacto ao Longo do Tempo**")
             
-            # Adicionamos 'TYPE OF REFERENCE' à lista de busca
             nomes_comuns_tipo = [
                 'TYPE', 'DT', 'DOCUMENT TYPE', 'TY', 'TIPO', 
                 'TIPO DE DOCUMENTO', 'TYPE OF REFERENCE', 'REFERENCE TYPE'
             ]
             
-            # O código agora vai encontrar sua coluna "TYPE OF REFERENCE"
             col_tipo_doc = next((c for c in df.columns if str(c).strip().upper() in nomes_comuns_tipo), None)
             
             opcoes_visao = ["Visão Geral"]
@@ -1037,6 +1037,9 @@ if st.session_state['df_geral'] is not None:
                             hist_data = df_ano.groupby(col_ano).size().reset_index(name='Volume')
                             hist_data['Citacoes'] = 0
                             
+                        # CORREÇÃO ARROW: Forçamos o tipo Inteiro para Volume para impedir o colapso do PyArrow
+                        hist_data['Volume'] = pd.to_numeric(hist_data['Volume'], errors='coerce').fillna(0).astype(int)
+                            
                         fig_hist = go.Figure()
                         fig_hist.add_trace(go.Bar(x=hist_data[col_ano], y=hist_data['Volume'], name="Documentos", marker_color="#2a9d8f"))
                         fig_hist.add_trace(go.Scatter(x=hist_data[col_ano], y=hist_data['Citacoes'], name="Citações", mode='lines+markers', yaxis='y2', line=dict(color="#e76f51", width=3)))
@@ -1049,9 +1052,12 @@ if st.session_state['df_geral'] is not None:
                         )
                         st.plotly_chart(fig_hist, use_container_width=True)
                     else:
-                        # Gráfico quebra por Artigo, Capítulo, etc.
                         df_ano[col_tipo_doc] = df_ano[col_tipo_doc].fillna("Desconhecido")
                         hist_data = df_ano.groupby([col_ano, col_tipo_doc]).size().reset_index(name='Volume')
+                        
+                        # CORREÇÃO ARROW: Forçamos o tipo Inteiro para Volume 
+                        hist_data['Volume'] = pd.to_numeric(hist_data['Volume'], errors='coerce').fillna(0).astype(int)
+                        
                         fig_hist = px.bar(hist_data, x=col_ano, y='Volume', color=col_tipo_doc, title="Volume de Documentos por Tipo e Ano", template="plotly_white")
                         fig_hist.update_layout(xaxis=dict(tickmode='linear', dtick=1))
                         st.plotly_chart(fig_hist, use_container_width=True)
@@ -1064,7 +1070,6 @@ if st.session_state['df_geral'] is not None:
         with tab_nuvem:
             st.markdown(f"**Assinatura Semântica do Perfil**")
             
-            # Controles de Personalização
             c1, c2, c3 = st.columns(3)
             with c1:
                 fonte_txt = st.selectbox("Composição do Texto:", ["Tudo Combinado", "Apenas Títulos", "Apenas Palavras-chave", "Apenas Resumo"], key=f"src_wc_{hash(termo_ativo)}")
@@ -1081,19 +1086,21 @@ if st.session_state['df_geral'] is not None:
                 "Acadêmico": ["#264653", "#2a9d8f", "#e9c46a", "#f4a261", "#e76f51"]
             }
 
-            # Preparação Dinâmica do Texto
-            subset_df_wc = subset_df.copy()
-            subset_df_wc['TEXTO_COMBINADO'] = ""
-            
+            # OTIMIZAÇÃO: Vetorização bruta do processamento de texto. Adeus iterrows!
+            textos_para_juntar = []
             col_ab = next((c for c in ['ABSTRACT', 'AB'] if c in df.columns), None)
             col_kw = next((c for c in ['KEYWORDS', 'KW', 'DE'] if c in df.columns), None)
             
-            for idx, row in subset_df_wc.iterrows():
-                trechos = []
-                if ("Tudo" in fonte_txt or "Título" in fonte_txt) and pd.notna(row.get(col_titulos)): trechos.append(str(row[col_titulos]))
-                if ("Tudo" in fonte_txt or "Palavras-chave" in fonte_txt) and col_kw and pd.notna(row.get(col_kw)): trechos.append(str(row[col_kw]).replace(';', ' '))
-                if ("Tudo" in fonte_txt or "Resumo" in fonte_txt) and col_ab and pd.notna(row.get(col_ab)): trechos.append(str(row[col_ab]))
-                subset_df_wc.at[idx, 'TEXTO_COMBINADO'] = " ".join(trechos)
+            if ("Tudo" in fonte_txt or "Título" in fonte_txt) and col_titulos:
+                textos_para_juntar.append(" ".join(subset_df[col_titulos].dropna().astype(str)))
+            if ("Tudo" in fonte_txt or "Palavras-chave" in fonte_txt) and col_kw:
+                textos_para_juntar.append(" ".join(subset_df[col_kw].dropna().astype(str).str.replace(';', ' ')))
+            if ("Tudo" in fonte_txt or "Resumo" in fonte_txt) and col_ab:
+                textos_para_juntar.append(" ".join(subset_df[col_ab].dropna().astype(str)))
+
+            texto_final_vetorizado = " ".join(textos_para_juntar)
+            
+            subset_df_wc = pd.DataFrame({'TEXTO_COMBINADO': [texto_final_vetorizado]})
 
             with st.spinner("Gerando nuvem de palavras específica..."):
                 from utils import gerar_nuvem_echarts
