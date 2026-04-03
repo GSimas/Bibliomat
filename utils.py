@@ -20,6 +20,131 @@ from pyecharts.commons.utils import JsCode
 import random
 import streamlit as st
 
+@st.cache_data
+def _engine_calculo_sna(nodes_list, edges_list, node_types):
+    """Engine interna para processar NetworkX. Retorna dados formatados e dicionários brutos."""
+    import networkx as nx
+    G = nx.Graph()
+    G.add_nodes_from(nodes_list)
+    G.add_edges_from(edges_list)
+    
+    # Cálculos Brutos
+    degree_abs = dict(G.degree())
+    degree_cent = nx.degree_centrality(G)
+    bet_cent = nx.betweenness_centrality(G)
+    clos_cent = nx.closeness_centrality(G)
+    
+    # Eigenvector é sensível e pode falhar em redes desconexas
+    try:
+        eigen_cent = nx.eigenvector_centrality_numpy(G)
+    except:
+        eigen_cent = {n: 0 for n in G.nodes()}
+
+    data_list = []
+    for node in G.nodes():
+        data_list.append({
+            "Item": node,
+            "Tipo": node_types.get(node, "Outro"),
+            "Grau Absoluto": degree_abs[node],
+            "Grau Centralidade": round(degree_cent[node], 4),
+            "Centralidade (Eigen)": round(eigen_cent.get(node, 0), 4),
+            "Betweenness": round(bet_cent[node], 4),
+            "Closeness": round(clos_cent[node], 4)
+        })
+    
+    # Retornamos a lista para a tabela E os dicionários para o grafo
+    return data_list, degree_abs, eigen_cent, bet_cent, clos_cent
+
+# --- CAMADA DE INTERFACE (Barra de Progresso - SEM CACHE DIRETO) ---
+
+def gerar_tabela_metricas_completas(df, _pbar=None):
+    """Interface que gerencia a barra de progresso e chama a engine para a tabela SNA."""
+    total = len(df)
+    col_titulos = next((c for c in ['TITLE', 'TI'] if c in df.columns), None)
+    col_autores = next((c for c in ['AUTHORS', 'AU'] if c in df.columns), None)
+    col_paises = next((c for c in ['COUNTRY'] if c in df.columns), None)
+    col_venue = next((c for c in ['SECONDARY TITLE', 'SO', 'JO'] if c in df.columns), None)
+    
+    nodes, edges, node_types = [], [], {}
+
+    for i, (_, row) in enumerate(df.iterrows()):
+        if _pbar: _pbar.progress((i + 1) / total, text=f"Mapeando topologia: {i+1}/{total}")
+        doc = str(row[col_titulos]) if col_titulos and pd.notna(row[col_titulos]) else None
+        if not doc: continue
+        nodes.append(doc); node_types[doc] = "Documento"
+        
+        if col_autores and pd.notna(row[col_autores]):
+            for a in [x.strip() for x in str(row[col_autores]).split(';') if x.strip()]:
+                nodes.append(a); node_types[a] = "Autor"; edges.append((doc, a))
+        if col_paises and pd.notna(row[col_paises]):
+            for p in [x.strip() for x in str(row[col_paises]).split(';') if x.strip()]:
+                nodes.append(p); node_types[p] = "País"; edges.append((doc, p))
+        if col_venue and pd.notna(row[col_venue]):
+            v = str(row[col_venue]).strip(); nodes.append(v); node_types[v] = "Local de Publicação (Venue)"; edges.append((doc, v))
+
+    if _pbar: _pbar.progress(1.0, text="Executando algoritmos de centralidade...")
+    
+    # Unpack apenas do primeiro item (a lista de dados)
+    res_data, _, _, _, _ = _engine_calculo_sna(list(set(nodes)), list(set(edges)), node_types)
+    return pd.DataFrame(res_data).sort_values(by="Grau Absoluto", ascending=False)
+
+def criar_grafo_e_metricas(df, coluna, top_n, metric_for_size="Tamanho Fixo", _pbar=None):
+    """Interface para o grafo agraph. Agora com métricas recuperadas da engine."""
+    docs_items = []
+    for row in df[coluna].dropna():
+        items = [x.strip() for x in str(row).split(';') if x.strip()]
+        if items: docs_items.append(items)
+
+    all_items = [item for sublist in docs_items for item in sublist]
+    item_counts = Counter(all_items)
+    top_items = set([x[0] for x in item_counts.most_common(top_n)])
+    
+    edges_list = []
+    total_docs = len(docs_items)
+    for i, items in enumerate(docs_items):
+        if _pbar: _pbar.progress((i + 1) / total_docs, text=f"Tecendo redes: {i+1}/{total_docs}")
+        filtered = [x for x in items if x in top_items]
+        if len(filtered) > 1:
+            edges_list.extend(list(combinations(sorted(filtered), 2)))
+
+    # Chamada da Engine com Unpack completo das métricas
+    node_types_gen = {node: "Entidade" for node in top_items}
+    if _pbar: _pbar.progress(1.0, text="Calculando topologia SNA...")
+    
+    res_list, deg, eigen, betw, clos = _engine_calculo_sna(list(top_items), list(set(edges_list)), node_types_gen)
+    
+    # Criamos o DataFrame para a interface
+    df_nodes = pd.DataFrame(res_list).rename(columns={"Item": "Nó", "Centralidade (Eigen)": "Centralidade (Eigenvector)"})
+    
+    # Mapeamento para o redimensionamento dos nós
+    metric_dict = {
+        "Grau Absoluto": deg, 
+        "Centralidade (Eigen)": eigen, 
+        "Betweenness": betw, 
+        "Closeness": clos
+    }
+    
+    def get_scaled_size(val, min_val, max_val, min_size=15, max_size=55):
+        if max_val == min_val: return min_size
+        return min_size + (val - min_val) * (max_size - min_size) / (max_val - min_val)
+
+    nodes_agraph = []
+    font_config = {"color": "black", "strokeWidth": 3, "strokeColor": "white"}
+    
+    if metric_for_size != "Tamanho Fixo" and metric_for_size in metric_dict:
+        m_dict = metric_dict[metric_for_size]
+        values = list(m_dict.values())
+        min_m, max_m = (min(values), max(values)) if values else (0, 1)
+        for node in top_items:
+            nodes_agraph.append(Node(id=node, label=node, size=get_scaled_size(m_dict.get(node, 0), min_m, max_m), color="#1273B9", font=font_config))
+    else:
+        for node in top_items:
+            nodes_agraph.append(Node(id=node, label=node, size=25, color="#1273B9", font=font_config))
+
+    edges_agraph = [Edge(source=u, target=v, color="#E0E0E0") for u, v in list(set(edges_list))]
+
+    return nodes_agraph, edges_agraph, df_nodes, {}
+
 def processar_excel_wos(file):
     
     # 1. Identifica a extensão para escolher o motor correto
@@ -155,6 +280,7 @@ def processar_csv_scopus(file):
 
     return df
 
+@st.cache_data
 def calcular_metricas_bibliometrix(df):
 
     """Calcula métricas avançadas baseadas no relatório Main Information do Bibliometrix."""
@@ -203,6 +329,7 @@ def calcular_metricas_bibliometrix(df):
         "avg_cit_year": round(df['TCperYear'].mean(), 2) if 'TCperYear' in df.columns else 0
     }
 
+@st.cache_data
 def gerar_mapa_tematico(df, coluna_texto, n_palavras=150):
     """Gera um Mapa Temático inspirado no Bibliometrix (Centralidade vs Densidade)."""
     import networkx as nx
@@ -339,73 +466,8 @@ def gerar_mapa_tematico(df, coluna_texto, n_palavras=150):
     
     return fig
 
-def gerar_tabela_metricas_completas(df):
-    """Gera uma tabela SNA completa com todos os tipos de entidades e métricas solicitadas."""
-    import networkx as nx
-    import pandas as pd
 
-    G = nx.Graph()
-    
-    # Identificadores de colunas
-    col_titulos = next((c for c in ['TITLE', 'TI'] if c in df.columns), None)
-    col_autores = next((c for c in ['AUTHORS', 'AU'] if c in df.columns), None)
-    col_paises = next((c for c in ['COUNTRY'] if c in df.columns), None)
-    col_venue = next((c for c in ['SECONDARY TITLE', 'SO', 'JO'] if c in df.columns), None)
-
-    node_types = {}
-
-    for _, row in df.iterrows():
-        doc = str(row[col_titulos]) if col_titulos and pd.notna(row[col_titulos]) else None
-        if not doc: continue
-        
-        # Adiciona Documento
-        G.add_node(doc)
-        node_types[doc] = "Documento"
-
-        # Conecta Autores
-        if col_autores and pd.notna(row[col_autores]):
-            for a in [x.strip() for x in str(row[col_autores]).split(';') if x.strip()]:
-                G.add_node(a)
-                node_types[a] = "Autor"
-                G.add_edge(doc, a)
-
-        # Conecta Países
-        if col_paises and pd.notna(row[col_paises]):
-            for p in [x.strip() for x in str(row[col_paises]).split(';') if x.strip()]:
-                G.add_node(p)
-                node_types[p] = "País"
-                G.add_edge(doc, p)
-
-        # Conecta Venue (Local de Publicação)
-        if col_venue and pd.notna(row[col_venue]):
-            v = str(row[col_venue]).strip()
-            G.add_node(v)
-            node_types[v] = "Local de Publicação (Venue)"
-            G.add_edge(doc, v)
-
-    if G.number_of_nodes() == 0:
-        return pd.DataFrame()
-
-    # Cálculo das Métricas
-    degree_abs = dict(G.degree())
-    degree_cent = nx.degree_centrality(G)
-    bet_cent = nx.betweenness_centrality(G)
-    clos_cent = nx.closeness_centrality(G)
-
-    # Montagem do DataFrame
-    data = []
-    for node in G.nodes():
-        data.append({
-            "Item": node,
-            "Tipo": node_types.get(node, "Outro"),
-            "Grau Absoluto": degree_abs[node],
-            "Grau Centralidade": round(degree_cent[node], 4),
-            "Betweenness": round(bet_cent[node], 4),
-            "Closeness": round(clos_cent[node], 4)
-        })
-
-    return pd.DataFrame(data).sort_values(by="Grau Absoluto", ascending=False)
-
+@st.cache_data
 def calcular_similares_biblio(termo_ativo, tipo_busca, df):
     """Calcula a similaridade (Jaccard) do 'DNA acadêmico' entre entidades."""
     if not termo_ativo:
@@ -761,109 +823,3 @@ def deduplicar_por_similaridade(df, threshold=0.90):
         
     df_unified = df_clean.drop(index=list(indices_para_excluir)).copy()
     return df_unified, df_dupes    
-# (As funções criar_grafo_e_metricas permanecem inalteradas. Mantenha-as aqui como na resposta anterior)
-def criar_grafo_e_metricas(df, coluna, top_n, metric_for_size="Tamanho Fixo"):
-    docs_items = []
-    for row in df[coluna].dropna():
-        items = [x.strip() for x in str(row).split(';') if x.strip()]
-        if items: docs_items.append(items)
-
-    all_items = [item for sublist in docs_items for item in sublist]
-    item_counts = Counter(all_items)
-    top_items = set([x[0] for x in item_counts.most_common(top_n)])
-
-    G = nx.Graph()
-    for item in top_items: G.add_node(item, count=item_counts[item])
-    for items in docs_items:
-        filtered_items = [x for x in items if x in top_items]
-        if len(filtered_items) > 1:
-            for u, v in combinations(sorted(filtered_items), 2):
-                if G.has_edge(u, v): G[u][v]['weight'] += 1
-                else: G.add_edge(u, v, weight=1)
-
-    degree = dict(G.degree())
-    try: betweenness = nx.betweenness_centrality(G, weight='weight')
-    except: betweenness = {n: 0 for n in G.nodes()}
-    try: closeness = nx.closeness_centrality(G)
-    except: closeness = {n: 0 for n in G.nodes()}
-    try: eigenvector = nx.eigenvector_centrality_numpy(G)
-    except: eigenvector = {n: 0 for n in G.nodes()}
-
-    node_data = []
-    for node in G.nodes():
-        node_data.append({
-            "Nó": node,
-            "Grau Absoluto": degree.get(node, 0),
-            "Centralidade (Eigenvector)": round(eigenvector.get(node, 0), 4),
-            "Betweenness": round(betweenness.get(node, 0), 4),
-            "Closeness": round(closeness.get(node, 0), 4)
-        })
-    df_nodes = pd.DataFrame(node_data).sort_values("Grau Absoluto", ascending=False)
-
-    def get_scaled_size(val, min_val, max_val, min_size=15, max_size=55):
-        if max_val == min_val: return min_size
-        return min_size + (val - min_val) * (max_size - min_size) / (max_val - min_val)
-
-    metric_dict = {"Grau Absoluto": degree, "Centralidade (Eigen)": eigenvector, "Betweenness": betweenness, "Closeness": closeness}
-    nodes_agraph = []
-    font_config = {"color": "black", "strokeWidth": 3, "strokeColor": "white"}
-    
-    if metric_for_size != "Tamanho Fixo" and metric_for_size in metric_dict:
-        m_dict = metric_dict[metric_for_size]
-        min_m, max_m = (min(m_dict.values()), max(m_dict.values())) if m_dict.values() else (0, 1)
-        for node in G.nodes():
-            nodes_agraph.append(Node(id=node, label=node, size=get_scaled_size(m_dict.get(node, 0), min_m, max_m), color="#1273B9", font=font_config))
-    else:
-        for node in G.nodes():
-            nodes_agraph.append(Node(id=node, label=node, size=25, color="#1273B9", font=font_config))
-
-    edges_agraph = [Edge(source=u, target=v, value=d['weight'], color="#E0E0E0") for u, v, d in G.edges(data=True)]
-
-    net_metrics = {}
-    if len(G) > 0:
-        net_metrics['densidade'] = nx.density(G)
-        try: net_metrics['eficiencia'] = nx.global_efficiency(G)
-        except: net_metrics['eficiencia'] = 0
-        try: net_metrics['clustering'] = nx.average_clustering(G)
-        except: net_metrics['clustering'] = 0
-        
-        deg_vals = list(degree.values())
-        if deg_vals:
-            net_metrics['mean_links'] = np.mean(deg_vals)
-            net_metrics['std_links'] = np.std(deg_vals)
-            net_metrics['min_links'] = np.min(deg_vals)
-            net_metrics['max_links'] = np.max(deg_vals)
-            deg_counts = Counter(deg_vals)
-            probs = [c / len(deg_vals) for c in deg_counts.values()]
-            net_metrics['entropia'] = -np.sum([p * np.log2(p) for p in probs if p > 0])
-            k, pk = np.array(list(deg_counts.keys())), np.array(list(deg_counts.values())) / len(deg_vals)
-            valid = (k > 0) & (pk > 0)
-            if np.sum(valid) > 1:
-                slope, _ = np.polyfit(np.log10(k[valid]), np.log10(pk[valid]), 1)
-                net_metrics['powerlaw'] = abs(slope)
-            else: net_metrics['powerlaw'] = 0
-        
-        net_metrics['pagerank'] = np.mean(list(nx.pagerank(G).values())) if len(G)>0 else 0
-        net_metrics['eigen_mean'] = np.mean(list(eigenvector.values())) if eigenvector else 0
-        try: net_metrics['constraint'] = np.mean(list(nx.constraint(G).values()))
-        except: net_metrics['constraint'] = 0
-        try:
-            eff_size = nx.effective_size(G)
-            net_metrics['redundancia'] = np.mean([degree[n] - eff_size[n] for n in G.nodes() if degree[n] > 0])
-        except: net_metrics['redundancia'] = 0
-        try: net_metrics['assortatividade'] = nx.degree_assortativity_coefficient(G)
-        except: net_metrics['assortatividade'] = 0
-        try:
-            rho, _ = stats.spearmanr(list(degree.values()), list(betweenness.values()))
-            net_metrics['spearman'] = rho if not np.isnan(rho) else 0
-        except: net_metrics['spearman'] = 0
-        try:
-            if max(deg_vals) > 1:
-                rc = nx.rich_club_coefficient(G, normalized=False)
-                t_k = int(max(deg_vals) * 0.8)
-                t_k = t_k if t_k in rc else max(rc.keys())
-                net_metrics['rich_club'] = rc[t_k]
-            else: net_metrics['rich_club'] = 0
-        except: net_metrics['rich_club'] = 0
-
-    return nodes_agraph, edges_agraph, df_nodes, net_metrics

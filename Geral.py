@@ -11,7 +11,8 @@ from streamlit_echarts import st_echarts
 from pyecharts.commons.utils import JsCode
 import json
 
-st.set_page_config(page_title="Bibliometrix Python", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="Simetrics", page_icon="🧬", layout="wide")
+
 
 st.title("🧬 Simetrics - Análise Bibliométrica e Cientométrica")
 
@@ -36,6 +37,8 @@ if 'df_duplicados' not in st.session_state or st.session_state['df_duplicados'] 
     st.session_state['df_duplicados'] = pd.DataFrame()
 
 with st.sidebar:
+    st.image("simetrics - logo.png", use_container_width=True)
+
     st.header("1. Envio de Arquivos")
     
     # --- NOVO: GUIA DE FORMATOS SUPORTADOS ---
@@ -353,19 +356,24 @@ if st.session_state['df_geral'] is not None:
             )
             
             if 'AUTHORS' in df.columns:
-                author_data = []
-                for _, row in df.iterrows():
-                    auth_list = [a.strip() for a in str(row['AUTHORS']).split(';') if a.strip()]
-                    cit = row['TOTAL CITATIONS'] if pd.notna(row['TOTAL CITATIONS']) else 0
-                    for a in auth_list:
-                        author_data.append({'Autor': a, 'Documentos': 1, 'Citações': cit})
+                # Otimização Vetorizada
+                df_auth_temp = df[['AUTHORS', 'TOTAL CITATIONS']].copy()
+                df_auth_temp['TOTAL CITATIONS'] = pd.to_numeric(df_auth_temp['TOTAL CITATIONS'], errors='coerce').fillna(0)
+                df_auth_temp['Autor'] = df_auth_temp['AUTHORS'].astype(str).str.split(';')
                 
-                df_auth_expanded = pd.DataFrame(author_data)
-                # Agrupamento robusto para calcular a média
+                df_auth_expanded = df_auth_temp.explode('Autor')
+                df_auth_expanded['Autor'] = df_auth_expanded['Autor'].str.strip()
+                df_auth_expanded = df_auth_expanded[df_auth_expanded['Autor'] != '']
+                df_auth_expanded['Documentos'] = 1
+                
+                # Agrupamento usando o nome real da coluna 'TOTAL CITATIONS'
                 res_auth = df_auth_expanded.groupby('Autor').agg({
                     'Documentos': 'sum', 
-                    'Citações': 'sum'
+                    'TOTAL CITATIONS': 'sum'
                 }).reset_index()
+                
+                # Renomeia para 'Citações' apenas APÓS o cálculo
+                res_auth.rename(columns={'TOTAL CITATIONS': 'Citações'}, inplace=True)
                 res_auth['Média'] = (res_auth['Citações'] / res_auth['Documentos']).round(2)
                 
                 if metric_author == "Qtd. de Documentos":
@@ -408,7 +416,6 @@ if st.session_state['df_geral'] is not None:
         
         with col_pais:
             st.markdown("##### 🌍 Top 20 Países Mais Produtivos")
-            
             metric_country = st.radio(
                 "Métrica de Países:", 
                 ["Qtd. de Documentos", "Total de Citações", "Média de Citações"], 
@@ -416,35 +423,37 @@ if st.session_state['df_geral'] is not None:
             )
             
             if 'COUNTRY' in df.columns:
-                country_data = []
-                df_with_country = df.dropna(subset=['COUNTRY'])
+                # Otimização Vetorizada
+                df_country_temp = df[['COUNTRY', 'TOTAL CITATIONS']].copy()
+                df_country_temp['TOTAL CITATIONS'] = pd.to_numeric(df_country_temp['TOTAL CITATIONS'], errors='coerce').fillna(0)
+                df_country_temp['País'] = df_country_temp['COUNTRY'].astype(str).str.split(';')
                 
-                for _, row in df_with_country.iterrows():
-                    countries = [c.strip() for c in str(row['COUNTRY']).split(';') if c.strip()]
-                    cit = row['TOTAL CITATIONS'] if pd.notna(row['TOTAL CITATIONS']) else 0
-                    for c in countries:
-                        country_data.append({'País': c, 'Documentos': 1, 'Citações': cit})
+                df_country_expanded = df_country_temp.explode('País')
+                df_country_expanded['País'] = df_country_expanded['País'].str.strip()
+                df_country_expanded = df_country_expanded[df_country_expanded['País'] != '']
+                df_country_expanded['Documentos'] = 1
                 
-                if country_data:
-                    df_country_expanded = pd.DataFrame(country_data)
-                    res_country = df_country_expanded.groupby('País').agg({
-                        'Documentos': 'sum', 
-                        'Citações': 'sum'
-                    }).reset_index()
-                    res_country['Média'] = (res_country['Citações'] / res_country['Documentos']).round(2)
-                    
-                    if metric_country == "Qtd. de Documentos":
-                        top_c = res_country.nlargest(20, 'Documentos')
-                        fig_c = px.bar(top_c, x='Documentos', y='País', orientation='h', color='Documentos', color_continuous_scale='Viridis')
-                    elif metric_country == "Total de Citações":
-                        top_c = res_country.nlargest(20, 'Citações')
-                        fig_c = px.bar(top_c, x='Citações', y='País', orientation='h', color='Citações', color_continuous_scale='Plasma')
-                    else: 
-                        top_c = res_country.nlargest(20, 'Média')
-                        fig_c = px.bar(top_c, x='Média', y='País', orientation='h', color='Média', color_continuous_scale='YlGnBu')
-                    
-                    fig_c.update_layout(yaxis={'categoryorder':'total ascending'})
-                    st.plotly_chart(fig_c, use_container_width=True)
+                # Agrupamento usando o nome real da coluna 'TOTAL CITATIONS'
+                res_country = df_country_expanded.groupby('País').agg({
+                    'Documentos': 'sum', 
+                    'TOTAL CITATIONS': 'sum'
+                }).reset_index()
+                
+                res_country.rename(columns={'TOTAL CITATIONS': 'Citações'}, inplace=True)
+                res_country['Média'] = (res_country['Citações'] / res_country['Documentos']).round(2)
+                
+                if metric_country == "Qtd. de Documentos":
+                    top_c = res_country.nlargest(20, 'Documentos')
+                    fig_c = px.bar(top_c, x='Documentos', y='País', orientation='h', color='Documentos', color_continuous_scale='Viridis')
+                elif metric_country == "Total de Citações":
+                    top_c = res_country.nlargest(20, 'Citações')
+                    fig_c = px.bar(top_c, x='Citações', y='País', orientation='h', color='Citações', color_continuous_scale='Plasma')
+                else: 
+                    top_c = res_country.nlargest(20, 'Média')
+                    fig_c = px.bar(top_c, x='Média', y='País', orientation='h', color='Média', color_continuous_scale='YlGnBu')
+                
+                fig_c.update_layout(yaxis={'categoryorder':'total ascending'})
+                st.plotly_chart(fig_c, use_container_width=True)
 
         with col_venue:
             st.markdown("##### 🏢 Top 20 Locais de Publicação (Venues)")
@@ -646,6 +655,13 @@ if st.session_state['df_geral'] is not None:
             top_n_nodes = st.slider("Top N Nós:", 10, 150, 50, 5)
             metric_for_size = st.selectbox("Basear tamanho do nó em:", ["Tamanho Fixo", "Grau Absoluto", "Centralidade (Eigen)", "Betweenness", "Closeness"])
             
+            # NOVO: Controle de estabilização do grafo (Física do vis.js)
+            estabilizar_grafo = st.checkbox(
+                "❄️ Congelar Grafo", 
+                value=False, 
+                help="Marque para desativar a simulação física após o carregamento. Isso impede que os nós fiquem se movendo 'loucamente' e facilita a leitura."
+            )
+            
             coluna_alvo = "AUTHORS" if tipo_grafo == "Rede de Coautoria" else None
             if not coluna_alvo:
                 for col in ['KEYWORDS', 'KW', 'DE']:
@@ -653,16 +669,30 @@ if st.session_state['df_geral'] is not None:
 
         with col_grafo:
             if coluna_alvo and coluna_alvo in df.columns:
-                with st.spinner("Calculando topologia SNA..."):
-                    nodes, edges, df_nodes, net_metrics = criar_grafo_e_metricas(df, coluna_alvo, top_n_nodes, metric_for_size)
-                    if len(nodes) > 0:
-                        # Substitua a configuração do agraph por esta no Geral.py:
-                        config = Config(
+                
+                # NOVO: Barra de progresso visual para a construção do grafo
+                pbar_grafo = st.progress(0, text="Iniciando construção da rede...")
+                
+                # Passamos o objeto _pbar para a função atualizada
+                nodes, edges, df_nodes, net_metrics = criar_grafo_e_metricas(
+                    df, coluna_alvo, top_n_nodes, metric_for_size, _pbar=pbar_grafo
+                )
+                
+                # Removemos a barra de progresso após o cálculo terminar
+                pbar_grafo.empty()
+                
+                if len(nodes) > 0:
+                    config = Config(
                         width="100%", 
                         height=700, 
                         directed=False, 
                         hierarchical=False,
                         navigationButtons=True, 
+                        
+                        # NOVO: O parâmetro physics recebe o inverso do checkbox
+                        # Se "Congelar" for True, physics é False (o grafo para de se mexer)
+                        physics=not estabilizar_grafo, 
+                        
                         interaction={
                             "hover": True, 
                             "zoomView": True, 
@@ -673,28 +703,32 @@ if st.session_state['df_geral'] is not None:
                         highlightColor="#F7A7A6",
                         stabilization=True,
                                                 
-                        # 1. Deixa os links (arestas) curvados
                         edges={
                             "smooth": {
                                 "enabled": True,
-                                "type": "dynamic" # "dynamic" calcula a curva para não cruzar nós se possível
+                                "type": "dynamic" 
                             }
                         }
                     )
 
-                        # Na chamada do agraph, os botões agora devem aparecer no canto inferior
-                        agraph(nodes=nodes, edges=edges, 
-                        config = config
-                        )
-                    else: st.warning("Sem conexões suficientes.")
-            else: st.warning("Coluna não encontrada.")
+                    agraph(nodes=nodes, edges=edges, config=config)
+                else: 
+                    st.warning("Sem conexões suficientes.")
+            else: 
+                st.warning("Coluna não encontrada.")
 
         st.divider()
         st.markdown("### 📊 Tabela de Nós e Métricas SNA (Rede Heterogênea)")
         st.caption("Esta tabela integra Autores, Documentos, Países e Venues, permitindo comparar a influência transversal de diferentes entidades.")
         
-        with st.spinner("Calculando topologia da rede completa..."):
-            df_metricas = gerar_tabela_metricas_completas(df)
+        # NOVO: Barra de progresso para o cálculo da tabela complexa
+        pbar_sna = st.progress(0, text="Calculando centralidades do ecossistema...")
+        
+        # Passamos a barra para a função
+        df_metricas = gerar_tabela_metricas_completas(df, _pbar=pbar_sna)
+        
+        # Removemos a barra ao terminar
+        pbar_sna.empty()
 
         if not df_metricas.empty:
             # Filtro rápido por tipo para o usuário
@@ -725,7 +759,7 @@ if st.session_state['df_geral'] is not None:
             )
         else:
             st.warning("Não há dados suficientes para calcular a rede heterogênea.")
-    
+
     # Inicializa o estado de busca se não existir
     if 'busca_tipo_biblio' not in st.session_state:
         st.session_state['busca_tipo_biblio'] = "Documento"
