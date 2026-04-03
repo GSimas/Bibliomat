@@ -985,19 +985,19 @@ if st.session_state['df_geral'] is not None:
         # =========================================================
         tab_hist, tab_nuvem, tab_similares = st.tabs(["📈 Evolução Histórica", "☁️ Lexicometria", "🔗 Itens Semelhantes"])
 
-        # Filtra os dados
+        # CORREÇÃO: Garante que o DataFrame vazio mantenha a "casca" das colunas originais
         if not termo_ativo:
-            subset_df = pd.DataFrame()
+            subset_df = pd.DataFrame(columns=df.columns)
         elif tipo_ativo == "Documento": 
-            subset_df = df[df[col_titulos] == termo_ativo] if col_titulos else pd.DataFrame()
+            subset_df = df[df[col_titulos] == termo_ativo] if col_titulos else pd.DataFrame(columns=df.columns)
         elif tipo_ativo == "Autor": 
-            subset_df = df[df[col_autores].fillna('').str.contains(str(termo_ativo), regex=False)] if col_autores else pd.DataFrame()
+            subset_df = df[df[col_autores].fillna('').str.contains(str(termo_ativo), regex=False)] if col_autores else pd.DataFrame(columns=df.columns)
         elif tipo_ativo == "País": 
-            subset_df = df[df[col_paises].fillna('').str.contains(str(termo_ativo), regex=False)] if col_paises else pd.DataFrame()
+            subset_df = df[df[col_paises].fillna('').str.contains(str(termo_ativo), regex=False)] if col_paises else pd.DataFrame(columns=df.columns)
         elif tipo_ativo == "Local de Publicação (Venue)": 
-            subset_df = df[df[col_venue] == termo_ativo] if col_venue else pd.DataFrame()
+            subset_df = df[df[col_venue] == termo_ativo] if col_venue else pd.DataFrame(columns=df.columns)
         else:
-            subset_df = pd.DataFrame()
+            subset_df = pd.DataFrame(columns=df.columns)
 
         # --- ABA 1: HISTÓRICO AVANÇADO ---
         with tab_hist:
@@ -1086,16 +1086,16 @@ if st.session_state['df_geral'] is not None:
                 "Acadêmico": ["#264653", "#2a9d8f", "#e9c46a", "#f4a261", "#e76f51"]
             }
 
-            # OTIMIZAÇÃO: Vetorização bruta do processamento de texto. Adeus iterrows!
             textos_para_juntar = []
             col_ab = next((c for c in ['ABSTRACT', 'AB'] if c in df.columns), None)
             col_kw = next((c for c in ['KEYWORDS', 'KW', 'DE'] if c in df.columns), None)
             
-            if ("Tudo" in fonte_txt or "Título" in fonte_txt) and col_titulos:
+            # CORREÇÃO 2: Verificamos se a coluna está em subset_df.columns antes de acessá-la
+            if ("Tudo" in fonte_txt or "Título" in fonte_txt) and col_titulos in subset_df.columns:
                 textos_para_juntar.append(" ".join(subset_df[col_titulos].dropna().astype(str)))
-            if ("Tudo" in fonte_txt or "Palavras-chave" in fonte_txt) and col_kw:
+            if ("Tudo" in fonte_txt or "Palavras-chave" in fonte_txt) and col_kw in subset_df.columns:
                 textos_para_juntar.append(" ".join(subset_df[col_kw].dropna().astype(str).str.replace(';', ' ')))
-            if ("Tudo" in fonte_txt or "Resumo" in fonte_txt) and col_ab:
+            if ("Tudo" in fonte_txt or "Resumo" in fonte_txt) and col_ab in subset_df.columns:
                 textos_para_juntar.append(" ".join(subset_df[col_ab].dropna().astype(str)))
 
             texto_final_vetorizado = " ".join(textos_para_juntar)
