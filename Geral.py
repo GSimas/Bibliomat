@@ -78,31 +78,51 @@ with st.sidebar:
             )
             
         if st.button("Processar e Integrar", type="primary"):
-            with st.spinner("Integrando múltiplas fontes..."):
-                import pandas as pd
-                from utils import processar_csv_scopus, processar_excel_wos
+            import pandas as pd
+            from utils import processar_csv_scopus, processar_excel_wos
+            
+            # 1. Inicializa a barra de progresso
+            pbar_load = st.progress(0, text="Iniciando integração de dados...")
+            
+            list_dfs = []
+            total_files = len(uploaded_files)
+            
+            for i, f in enumerate(uploaded_files):
+                # 2. Atualiza a barra para cada arquivo processado
+                progresso_atual = (i + 1) / total_files
+                pbar_load.progress(progresso_atual, text=f"Integrando {f.name} ({i+1}/{total_files})")
                 
-                list_dfs = []
-                for f in uploaded_files:
-                    ext = f.name.lower()
-                    if ext.endswith('.csv'):
-                        df_temp = processar_csv_scopus(f)
-                    elif ext.endswith(('.xls', '.xlsx')):
-                        df_temp = processar_excel_wos(f)
-                    else:
-                        # Processamento RIS existente
-                        df_temp = process_multiple_ris([f], {f.name: db_mapping[f.name]})
-                    
-                    if df_temp is not None:
-                        df_temp['BASE DE DADOS'] = db_mapping[f.name]
-                        list_dfs.append(df_temp)
+                ext = f.name.lower()
+                if ext.endswith('.csv'):
+                    df_temp = processar_csv_scopus(f)
+                elif ext.endswith(('.xls', '.xlsx')):
+                    df_temp = processar_excel_wos(f)
+                else:
+                    # Processamento RIS existente
+                    df_temp = process_multiple_ris([f], {f.name: db_mapping[f.name]})
+                
+                if df_temp is not None:
+                    df_temp['BASE DE DADOS'] = db_mapping[f.name]
+                    list_dfs.append(df_temp)
 
-                if list_dfs:
+            # 3. Remove a barra de progresso ao finalizar o loop
+            pbar_load.empty()
+
+            if list_dfs:
+                with st.spinner("Consolidando estrutura final..."):
                     df_raw = pd.concat(list_dfs, ignore_index=True)
+                    
+                    # Garante que o ano seja numérico para evitar erros nos gráficos
+                    if 'YEAR CLEAN' not in df_raw.columns and 'YEAR' in df_raw.columns:
+                        df_raw['YEAR CLEAN'] = pd.to_numeric(df_raw['YEAR'], errors='coerce')
+                    
                     st.session_state['df_original'] = df_raw.copy()
                     st.session_state['df_geral'] = df_raw
                     st.session_state['df_duplicados'] = pd.DataFrame()
+                    st.success(f"Sucesso! {len(df_raw)} documentos integrados.")
                     st.rerun()
+            else:
+                st.error("Não foi possível extrair dados dos arquivos selecionados.")
 
 if st.session_state['df_geral'] is not None:
     df = st.session_state['df_geral']
@@ -825,38 +845,46 @@ if st.session_state['df_geral'] is not None:
             col_info, col_sna = st.columns([2, 1])
             
             # --- FUNÇÃO INTERNA: Cálculo de SNA na Rede Heterogênea ---
+            # --- FUNÇÃO INTERNA OTIMIZADA: Cálculo de SNA na Rede Heterogênea ---
             @st.cache_data
             def calcular_sna_local(df_dados, termo, tipo):
                 import networkx as nx
                 G = nx.Graph()
-                for _, row in df_dados.iterrows():
+                
+                # OTIMIZAÇÃO 1: Converter para lista de dicionários antes do loop
+                colunas_necessarias = [c for c in [col_titulos, col_autores, col_paises, col_venue] if c is not None]
+                records = df_dados[colunas_necessarias].to_dict('records')
+                
+                for row in records:
                     doc_node = str(row.get(col_titulos, ''))
-                    if not doc_node: continue
+                    if not doc_node or doc_node == 'nan': continue
                     
                     G.add_node(doc_node, type='Documento')
                     
                     # Conecta Autores
-                    if col_autores and pd.notna(row[col_autores]):
+                    if col_autores and pd.notna(row.get(col_autores)):
                         for a in [x.strip() for x in str(row[col_autores]).split(';') if x.strip()]:
                             G.add_node(a, type='Autor')
                             G.add_edge(doc_node, a)
                     # Conecta Países
-                    if col_paises and pd.notna(row[col_paises]):
+                    if col_paises and pd.notna(row.get(col_paises)):
                         for p in [x.strip() for x in str(row[col_paises]).split(';') if x.strip()]:
                             G.add_node(p, type='País')
                             G.add_edge(doc_node, p)
                     # Conecta Venue
-                    if col_venue and pd.notna(row[col_venue]):
+                    if col_venue and pd.notna(row.get(col_venue)):
                         venue = str(row[col_venue]).strip()
                         G.add_node(venue, type='Venue')
                         G.add_edge(doc_node, venue)
 
                 if termo not in G: return None
                 
-                # Cálculo de métricas
+                # OTIMIZAÇÃO 2: Limite de profundidade no Ego Graph e cálculo
                 grau_abs = G.degree(termo)
                 cent_grau = nx.degree_centrality(G).get(termo, 0)
-                ego_net = nx.ego_graph(G, termo, radius=2)
+                
+                # Restringe a rede local a raio 1 para não calcular a base inteira
+                ego_net = nx.ego_graph(G, termo, radius=1) 
                 betw = nx.betweenness_centrality(ego_net).get(termo, 0)
                 clos = nx.closeness_centrality(ego_net).get(termo, 0)
                 
