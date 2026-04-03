@@ -18,6 +18,490 @@ from pyecharts.charts import WordCloud as PyechartsWordCloud
 import json
 from pyecharts.commons.utils import JsCode
 import random
+import streamlit as st
+
+def processar_excel_wos(file):
+    
+    # 1. Identifica a extensão para escolher o motor correto
+    engine = 'openpyxl' if file.name.endswith('.xlsx') else 'xlrd'
+    
+    # 2. Carrega o arquivo com o motor específico
+    df = pd.read_excel(file, engine=engine)
+    
+    # 1. Mapeamento de Colunas WoS -> Padrão Bibliomat
+    mapa_colunas = {
+        'Article Title': 'TITLE',
+        'Publication Year': 'YEAR',
+        'Source Title': 'SECONDARY TITLE',
+        'Abstract': 'ABSTRACT',
+        'Document Type': 'DOCUMENT TYPE',
+        'DOI': 'DOI',
+        'Authors': 'AUTHORS'
+    }
+    df = df.rename(columns={k: v for k, v in mapa_colunas.items() if k in df.columns})
+
+    # 2. Tratamento de Citações (WoS Core é o padrão de impacto)
+    col_cit = next((c for c in ['Times Cited, WoS Core', 'Times Cited, All Databases'] if c in df.columns), None)
+    if col_cit:
+        df['TOTAL CITATIONS'] = pd.to_numeric(df[col_cit], errors='coerce').fillna(0)
+
+    # 3. Tratamento de Palavras-Chave (Unindo Author Keywords e Keywords Plus)
+    col_de = 'Author Keywords'
+    col_id = 'Keywords Plus'
+    df['KEYWORDS'] = df[[c for c in [col_de, col_id] if c in df.columns]].fillna('').astype(str).apply(
+        lambda x: '; '.join([k for k in x if k.strip() != '']), axis=1
+    )
+
+    # 4. Extração de Países (A partir da coluna 'Addresses')
+    if 'Addresses' in df.columns:
+        def extrair_paises_wos(addr_str):
+            if pd.isna(addr_str): return ""
+            
+            enderecos = str(addr_str).split(';')
+            paises_encontrados = [] # Usando nome claro para a lista
+            
+            for addr in enderecos:
+                partes = addr.split(',')
+                if len(partes) > 0:
+                    # 'pais_texto' é uma string
+                    pais_texto = partes[-1].replace('.', '').strip()
+                    # Limpa números e CEPs
+                    pais_limpo = re.sub(r'\d+', '', pais_texto).strip()
+                    
+                    # CORREÇÃO: Adicionamos à lista (plural), não à string (singular)
+                    if pais_limpo: 
+                        paises_encontrados.append(pais_limpo)
+            
+            # Remove duplicatas e junta com ponto-e-vírgula
+            return "; ".join(list(set(paises_encontrados)))
+        
+        df['COUNTRY'] = df['Addresses'].apply(extrair_paises_wos)
+
+    # 5. Ano Limpo
+    if 'YEAR' in df.columns:
+        df['YEAR CLEAN'] = pd.to_numeric(df['YEAR'], errors='coerce')
+
+    return df
+
+
+def processar_csv_scopus(file):
+    """Lê um CSV (Scopus) e padroniza as colunas para o ecossistema Bibliomat."""
+    
+    # Tenta ler o CSV. O Scopus pode usar vírgula e aspas específicas.
+    df = pd.read_csv(file, sep=',', encoding='utf-8')
+    
+    # 1. Mapeamento Direto de Colunas
+    mapa_colunas = {
+        'Title': 'TITLE',
+        'Year': 'YEAR',
+        'Source title': 'SECONDARY TITLE',
+        'Abstract': 'ABSTRACT',
+        'Document Type': 'DOCUMENT TYPE',
+        'DOI': 'DOI'
+    }
+    # Renomeia as colunas que existem no CSV
+    df = df.rename(columns={k: v for k, v in mapa_colunas.items() if k in df.columns})
+
+    # 2. Tratamento de Citações
+    if 'Cited by' in df.columns:
+        df['TOTAL CITATIONS'] = pd.to_numeric(df['Cited by'], errors='coerce').fillna(0)
+
+    # 3. Tratamento de Autores (Convertendo vírgulas para ponto-e-vírgula se necessário)
+    if 'Authors' in df.columns:
+        # Scopus às vezes traz "Silva A., Santos B." - vamos garantir que a separação por ';' exista
+        df['AUTHORS'] = df['Authors'].apply(
+            lambda x: str(x).replace('.,', '.;') if pd.notna(x) else ""
+        )
+
+    # 4. Tratamento de Palavras-Chave (Juntando as do autor e as indexadas)
+    col_kw_existentes = [c for c in ['Author Keywords', 'Index Keywords'] if c in df.columns]
+    
+    if col_kw_existentes:
+        # Garantimos que todos os dados sejam strings e substituímos nulos por texto vazio
+        # Usamos uma função lambda para filtrar apenas o que não for vazio antes de juntar
+        df['KEYWORDS'] = df[col_kw_existentes].fillna('').astype(str).apply(
+            lambda x: '; '.join([termo for termo in x if termo.strip() != '']), 
+            axis=1
+        )
+    else:
+        df['KEYWORDS'] = ""
+
+    # 5. Tratamento de País (Extraindo da coluna de afiliações)
+    if 'Affiliations' in df.columns:
+        def extrair_paises(affil_str):
+            if pd.isna(affil_str) or str(affil_str).strip() == '':
+                return ""
+            
+            paises = []
+            # Scopus separa múltiplas afiliações por ';'
+            lista_affils = str(affil_str).split(';')
+            for affil in lista_affils:
+                # O país geralmente é a última palavra após a última vírgula
+                partes = affil.split(',')
+                if partes:
+                    pais = partes[-1].strip()
+                    # Removemos números ou CEPs que às vezes vêm grudados no nome do país
+                    pais_limpo = ''.join([i for i in pais if not i.isdigit()]).strip()
+                    paises.append(pais_limpo)
+            
+            # Remove duplicatas e retorna separado por ponto-e-vírgula
+            return "; ".join(list(set(paises)))
+
+        df['COUNTRY'] = df['Affiliations'].apply(extrair_paises)
+
+    # 6. Ano Limpo (Para gráficos temporais)
+    if 'YEAR' in df.columns:
+        df['YEAR CLEAN'] = pd.to_numeric(df['YEAR'], errors='coerce')
+
+    return df
+
+def calcular_metricas_bibliometrix(df):
+
+    """Calcula métricas avançadas baseadas no relatório Main Information do Bibliometrix."""
+    import pandas as pd
+    import numpy as np
+
+    # 1. Taxa de Crescimento Anual (%)
+    anos = df['YEAR CLEAN'].dropna().unique()
+    if len(anos) > 1:
+        n_anos = anos.max() - anos.min()
+        doc_inicio = len(df[df['YEAR CLEAN'] == anos.min()])
+        doc_fim = len(df[df['YEAR CLEAN'] == anos.max()])
+        # Fórmula CAGR: [(Vfinal/Vinicial)^(1/t) - 1] * 100
+        growth_rate = ((doc_fim / doc_inicio)**(1/n_anos) - 1) * 100 if doc_inicio > 0 else 0
+    else:
+        growth_rate = 0
+
+    # 2. Citações Médias por Ano por Doc
+    # NTC: Normalized Total Citations (TC / Média de TC do ano)
+    if 'TOTAL CITATIONS' in df.columns and 'YEAR CLEAN' in df.columns:
+        df['TCperYear'] = df['TOTAL CITATIONS'] / (2026 - df['YEAR CLEAN'] + 1)
+        media_por_ano = df.groupby('YEAR CLEAN')['TOTAL CITATIONS'].transform('mean')
+        df['NTC'] = df['TOTAL CITATIONS'] / media_por_ano
+    
+    # 3. Colaboração (SCP vs MCP)
+    # SCP: Single Country Pubs | MCP: Multiple Country Pubs
+    mcp_count = 0
+    if 'COUNTRY' in df.columns:
+        mcp_count = df['COUNTRY'].dropna().apply(lambda x: len(set(str(x).split(';'))) > 1).sum()
+    
+    # 4. Índice de Coautoria
+    autores_por_doc = 0
+    if 'AUTHORS' in df.columns:
+        counts = df['AUTHORS'].dropna().apply(lambda x: len(str(x).split(';')))
+        autores_por_doc = counts.mean()
+        docs_unico_autor = (counts == 1).sum()
+    else:
+        docs_unico_autor = 0
+
+    return {
+        "growth_rate": round(growth_rate, 2),
+        "mcp": mcp_count,
+        "scp": len(df) - mcp_count,
+        "coauth_index": round(autores_por_doc, 2),
+        "single_author_docs": docs_unico_autor,
+        "avg_cit_year": round(df['TCperYear'].mean(), 2) if 'TCperYear' in df.columns else 0
+    }
+
+def gerar_mapa_tematico(df, coluna_texto, n_palavras=150):
+    """Gera um Mapa Temático inspirado no Bibliometrix (Centralidade vs Densidade)."""
+    import networkx as nx
+    import pandas as pd
+    import plotly.express as px
+    from collections import Counter
+    from networkx.algorithms.community import greedy_modularity_communities
+    import re
+    from wordcloud import STOPWORDS
+
+    # 1. Limpeza e Extração do Corpus
+    textos = df[coluna_texto].dropna().astype(str).tolist()
+    stopwords = set(STOPWORDS)
+    stopwords.update(["research", "study", "analysis", "results", "using", "paper", "article", "author", "may", "can", "will"])
+
+    docs_words = []
+    for text in textos:
+        words = re.findall(r'\b\w{3,}\b', text.lower())
+        words = [w for w in words if w not in stopwords]
+        docs_words.append(words)
+
+    todas_palavras = [w for doc in docs_words for w in doc]
+    top_words = [w for w, c in Counter(todas_palavras).most_common(n_palavras)]
+    top_words_set = set(top_words)
+
+    if not top_words_set: 
+        return None
+
+    # 2. Construção da Rede de Co-ocorrência
+    G = nx.Graph()
+    for doc in docs_words:
+        valid_words = [w for w in doc if w in top_words_set]
+        for i in range(len(valid_words)):
+            for j in range(i+1, len(valid_words)):
+                w1, w2 = valid_words[i], valid_words[j]
+                if G.has_edge(w1, w2):
+                    G[w1][w2]['weight'] += 1
+                else:
+                    G.add_edge(w1, w2, weight=1)
+
+    if len(G.nodes) == 0: 
+        return None
+
+    # 3. Detecção de Comunidades (Temas) e Cálculo de Métricas
+    # greedy_modularity aproxima o algoritmo de Louvain nativamente no networkx
+    comunidades = list(greedy_modularity_communities(G, weight='weight'))
+
+    dados_clusters = []
+    for idx, com in enumerate(comunidades):
+        com = list(com)
+        if len(com) < 2: continue
+
+        # Frequência total do cluster (tamanho da bolha)
+        freq = sum([Counter(todas_palavras)[w] for w in com])
+
+        # Força Interna (Densidade) e Externa (Centralidade)
+        internal_weight = 0
+        external_weight = 0
+
+        for node in com:
+            for vizinho, dict_arestas in G[node].items():
+                if vizinho in com:
+                    internal_weight += dict_arestas['weight']
+                else:
+                    external_weight += dict_arestas['weight']
+
+        internal_weight /= 2 # Divide por 2 pois arestas internas foram contadas duas vezes
+
+        # Seleciona as 3 palavras mais proeminentes para nomear o cluster
+        palavras_ordenadas = sorted(com, key=lambda w: Counter(todas_palavras)[w], reverse=True)
+        nome_tema = "<br>".join(palavras_ordenadas[:3])
+        tooltip_words = ", ".join(palavras_ordenadas[:6])
+
+        dados_clusters.append({
+            'Cluster': f"Tema {idx+1}",
+            'Palavras': tooltip_words,
+            'Label': nome_tema,
+            'Grau de Desenvolvimento (Densidade)': internal_weight,
+            'Grau de Relevância (Centralidade)': external_weight,
+            'Frequência': freq
+        })
+
+    df_clusters = pd.DataFrame(dados_clusters)
+    if df_clusters.empty: 
+        return None
+
+    # 4. Construção do Gráfico Plotly
+    mean_cent = df_clusters['Grau de Relevância (Centralidade)'].mean()
+    mean_dens = df_clusters['Grau de Desenvolvimento (Densidade)'].mean()
+
+    fig = px.scatter(
+        df_clusters, 
+        x='Grau de Relevância (Centralidade)', 
+        y='Grau de Desenvolvimento (Densidade)', 
+        size='Frequência',
+        color='Cluster', 
+        text='Label', 
+        hover_data=['Palavras'],
+        size_max=50, 
+        color_discrete_sequence=px.colors.qualitative.Pastel
+    )
+
+    fig.update_traces(
+        textposition='middle center', 
+        textfont_size=11, 
+        marker=dict(line=dict(width=1, color='DarkSlateGrey'))
+    )
+
+    # Linhas divisórias dos quadrantes
+    fig.add_hline(y=mean_dens, line_dash="dash", line_color="gray", opacity=0.5)
+    fig.add_vline(x=mean_cent, line_dash="dash", line_color="gray", opacity=0.5)
+
+    # Anotações dos 4 Quadrantes (usando referências fixas da tela xref/yref)
+    quadrantes = [
+        dict(x=0.99, y=0.99, text="<b>Temas Motores</b><br>(Alta Centralidade/Alta Densidade)", xanchor="right", yanchor="top"),
+        dict(x=0.01, y=0.99, text="<b>Temas de Nicho</b><br>(Baixa Centralidade/Alta Densidade)", xanchor="left", yanchor="top"),
+        dict(x=0.99, y=0.01, text="<b>Temas Básicos/Transversais</b><br>(Alta Centralidade/Baixa Densidade)", xanchor="right", yanchor="bottom"),
+        dict(x=0.01, y=0.01, text="<b>Temas Emergentes/Declínio</b><br>(Baixa Centralidade/Baixa Densidade)", xanchor="left", yanchor="bottom")
+    ]
+    
+    for q in quadrantes:
+        fig.add_annotation(
+            x=q['x'], y=q['y'], xref="paper", yref="paper", 
+            text=q['text'], showarrow=False, 
+            font=dict(color="gray", size=11), align=q['xanchor']
+        )
+
+    fig.update_layout(
+        template="plotly_white",
+        showlegend=False,
+        height=650,
+        margin=dict(l=40, r=40, t=40, b=40)
+    )
+    
+    return fig
+
+def gerar_tabela_metricas_completas(df):
+    """Gera uma tabela SNA completa com todos os tipos de entidades e métricas solicitadas."""
+    import networkx as nx
+    import pandas as pd
+
+    G = nx.Graph()
+    
+    # Identificadores de colunas
+    col_titulos = next((c for c in ['TITLE', 'TI'] if c in df.columns), None)
+    col_autores = next((c for c in ['AUTHORS', 'AU'] if c in df.columns), None)
+    col_paises = next((c for c in ['COUNTRY'] if c in df.columns), None)
+    col_venue = next((c for c in ['SECONDARY TITLE', 'SO', 'JO'] if c in df.columns), None)
+
+    node_types = {}
+
+    for _, row in df.iterrows():
+        doc = str(row[col_titulos]) if col_titulos and pd.notna(row[col_titulos]) else None
+        if not doc: continue
+        
+        # Adiciona Documento
+        G.add_node(doc)
+        node_types[doc] = "Documento"
+
+        # Conecta Autores
+        if col_autores and pd.notna(row[col_autores]):
+            for a in [x.strip() for x in str(row[col_autores]).split(';') if x.strip()]:
+                G.add_node(a)
+                node_types[a] = "Autor"
+                G.add_edge(doc, a)
+
+        # Conecta Países
+        if col_paises and pd.notna(row[col_paises]):
+            for p in [x.strip() for x in str(row[col_paises]).split(';') if x.strip()]:
+                G.add_node(p)
+                node_types[p] = "País"
+                G.add_edge(doc, p)
+
+        # Conecta Venue (Local de Publicação)
+        if col_venue and pd.notna(row[col_venue]):
+            v = str(row[col_venue]).strip()
+            G.add_node(v)
+            node_types[v] = "Local de Publicação (Venue)"
+            G.add_edge(doc, v)
+
+    if G.number_of_nodes() == 0:
+        return pd.DataFrame()
+
+    # Cálculo das Métricas
+    degree_abs = dict(G.degree())
+    degree_cent = nx.degree_centrality(G)
+    bet_cent = nx.betweenness_centrality(G)
+    clos_cent = nx.closeness_centrality(G)
+
+    # Montagem do DataFrame
+    data = []
+    for node in G.nodes():
+        data.append({
+            "Item": node,
+            "Tipo": node_types.get(node, "Outro"),
+            "Grau Absoluto": degree_abs[node],
+            "Grau Centralidade": round(degree_cent[node], 4),
+            "Betweenness": round(bet_cent[node], 4),
+            "Closeness": round(clos_cent[node], 4)
+        })
+
+    return pd.DataFrame(data).sort_values(by="Grau Absoluto", ascending=False)
+
+def calcular_similares_biblio(termo_ativo, tipo_busca, df):
+    """Calcula a similaridade (Jaccard) do 'DNA acadêmico' entre entidades."""
+    if not termo_ativo:
+        return {}
+    
+    # Identifica colunas-chave do dataset
+    col_titulos = next((c for c in ['TITLE', 'TI'] if c in df.columns), None)
+    col_autores = next((c for c in ['AUTHORS', 'AU'] if c in df.columns), None)
+    col_kw = next((c for c in ['KEYWORDS', 'KW', 'DE'] if c in df.columns), None)
+    col_venue = next((c for c in ['SECONDARY TITLE', 'SO', 'JO'] if c in df.columns), None)
+    col_paises = next((c for c in ['COUNTRY'] if c in df.columns), None)
+
+    def extrair_features(df_subset):
+        """Extrai as impressões digitais da entidade (Assuntos, Parceiros, Locais)."""
+        kws, aus, venues = set(), set(), set()
+        for _, r in df_subset.iterrows():
+            if col_kw and pd.notna(r[col_kw]): 
+                kws.update([k.strip().lower() for k in str(r[col_kw]).split(';') if k.strip()])
+            if col_autores and pd.notna(r[col_autores]): 
+                aus.update([a.strip() for a in str(r[col_autores]).split(';') if a.strip()])
+            if col_venue and pd.notna(r[col_venue]): 
+                venues.add(str(r[col_venue]).strip())
+        return kws, aus, venues
+        
+    # Isola a entidade buscada e captura seu "DNA"
+    if tipo_busca == "Documento": subset_alvo = df[df[col_titulos] == termo_ativo]
+    elif tipo_busca == "Autor": subset_alvo = df[df[col_autores].fillna('').str.contains(termo_ativo, regex=False)]
+    elif tipo_busca == "País": subset_alvo = df[df[col_paises].fillna('').str.contains(termo_ativo, regex=False)] if col_paises else pd.DataFrame()
+    elif tipo_busca == "Local de Publicação (Venue)": subset_alvo = df[df[col_venue] == termo_ativo]
+    else: return {}
+
+    kw_alvo, au_alvo, venue_alvo = extrair_features(subset_alvo)
+    
+    # Previne que a entidade combine consigo mesma no escore
+    if tipo_busca in ["Documento", "Autor"]: au_alvo.discard(termo_ativo)
+    
+    dna_alvo = kw_alvo.union(au_alvo).union(venue_alvo)
+    if not dna_alvo: return {}
+
+    resultados = []
+    
+    # Compara o Alvo com todos os Candidatos
+    if tipo_busca == "Documento":
+        for _, r in df[df[col_titulos] != termo_ativo].iterrows():
+            cand_nome = r[col_titulos]
+            k, a, v = extrair_features(pd.DataFrame([r]))
+            dna_cand = k.union(a).union(v)
+            inter = dna_alvo.intersection(dna_cand)
+            if inter:
+                jaccard = len(inter) / len(dna_alvo.union(dna_cand))
+                resultados.append({'Item': cand_nome, 'Similaridade (%)': round(jaccard * 100, 1), 'Traços em Comum': " | ".join(list(inter)[:4])})
+                
+    elif tipo_busca == "Autor":
+        todos_autores = set()
+        for au_str in df[col_autores].dropna(): todos_autores.update([a.strip() for a in str(au_str).split(';') if a.strip()])
+        todos_autores.discard(termo_ativo)
+        
+        for cand in todos_autores:
+            sub_cand = df[df[col_autores].fillna('').str.contains(cand, regex=False)]
+            k, a, v = extrair_features(sub_cand)
+            a.discard(cand)
+            dna_cand = k.union(a).union(v)
+            inter = dna_alvo.intersection(dna_cand)
+            if inter:
+                jaccard = len(inter) / len(dna_alvo.union(dna_cand))
+                resultados.append({'Item': cand, 'Similaridade (%)': round(jaccard * 100, 1), 'Traços em Comum': " | ".join(list(inter)[:4])})
+                
+    elif tipo_busca in ["País", "Local de Publicação (Venue)"]:
+         col_busca = col_paises if tipo_busca == 'País' else col_venue
+         if col_busca:
+             todos_itens = set([x.strip() for s in df[col_busca].dropna() for x in str(s).split(';') if x.strip()])
+             todos_itens.discard(termo_ativo)
+             for cand in todos_itens:
+                 sub_cand = df[df[col_busca].fillna('').str.contains(cand, regex=False)]
+                 k, a, v = extrair_features(sub_cand)
+                 dna_cand = k.union(a).union(v)
+                 inter = dna_alvo.intersection(dna_cand)
+                 if inter:
+                     jaccard = len(inter) / len(dna_alvo.union(dna_cand))
+                     resultados.append({'Item': cand, 'Similaridade (%)': round(jaccard * 100, 1), 'Traços em Comum': " | ".join(list(inter)[:4])})
+
+    # Ordena, remove quem não tem nada a ver e corta nos top 15
+    resultados = sorted([r for r in resultados if r['Similaridade (%)'] > 0], key=lambda x: x['Similaridade (%)'], reverse=True)[:15]
+    
+    if tipo_busca == "Documento": return {'Documentos': resultados}
+    elif tipo_busca == "Autor": return {'Autores': resultados}
+    else: return {'Itens': resultados}
+
+def limpar_termo_busca():
+    """Limpa o termo de busca quando o usuário clica manualmente no botão de rádio."""
+    st.session_state['busca_termo_biblio'] = None
+
+def navegar_busca(novo_tipo, novo_termo):
+    """Atualiza o estado global para mudar o perfil exibido no motor de busca."""
+    st.session_state['busca_tipo_biblio'] = novo_tipo
+    st.session_state['busca_termo_biblio'] = novo_termo
 
 def gerar_nuvem_echarts(df, coluna, fonte="Arial", paleta=None):
     """Gera o dicionário nativo da nuvem de palavras, livre de erros de conversão JS."""

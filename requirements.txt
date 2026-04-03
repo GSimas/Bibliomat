@@ -10,3 +10,5 @@ wordcloud
 numpy
 pyecharts
 streamlit-echarts
+xlrd>=2.0.1
+openpyxl
