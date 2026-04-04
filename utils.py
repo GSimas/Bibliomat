@@ -663,7 +663,7 @@ def plot_top_keywords_metric(df, metric_name, top_n=20):
         orientation='h',
         labels={col_kw: 'Palavra-chave', metric_name: metric_name},
         color=metric_name,
-        color_continuous_scale='Viridis' # Gradiente do roxo ao amarelo
+        color_continuous_scale='Viridis'
     )
 
     fig.update_layout(
@@ -672,7 +672,6 @@ def plot_top_keywords_metric(df, metric_name, top_n=20):
         plot_bgcolor='rgba(0,0,0,0)',
         margin=dict(l=20, r=20, t=40, b=20),
         height=600,
-        # ATUALIZAÇÃO: Exibindo e configurando a barra de cores (legenda)
         coloraxis_showscale=True,
         coloraxis_colorbar=dict(
             title=dict(text=metric_name, font=dict(size=12)),
