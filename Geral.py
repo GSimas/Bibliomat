@@ -3,13 +3,19 @@ import pandas as pd
 import plotly.express as px
 from streamlit_agraph import agraph, Config
 import plotly.graph_objects as go
-from utils import processar_csv_scopus, calcular_metricas_bibliometrix, gerar_tabela_metricas_completas, calcular_similares_biblio, limpar_termo_busca, navegar_busca, process_multiple_ris, criar_grafo_e_metricas, deduplicar_por_doi, deduplicar_por_similaridade
+from utils import gerar_mapa_tematico, gerar_nuvem_echarts, processar_excel_wos, processar_csv_scopus, calcular_metricas_bibliometrix, gerar_tabela_metricas_completas, calcular_similares_biblio, limpar_termo_busca, navegar_busca, process_multiple_ris, criar_grafo_e_metricas, deduplicar_por_doi, deduplicar_por_similaridade
 from pyecharts import options as opts
 from pyecharts.charts import WordCloud as PyechartsWordCloud
 from streamlit_echarts import st_pyecharts
 from streamlit_echarts import st_echarts
 from pyecharts.commons.utils import JsCode
 import json
+import plotly.express as px
+import io
+import os
+from collections import Counter
+import networkx as nx
+
 
 st.set_page_config(page_title="Simetrics", page_icon="🧬", layout="wide")
 
@@ -78,8 +84,6 @@ with st.sidebar:
             )
             
         if st.button("Processar e Integrar", type="primary"):
-            import pandas as pd
-            from utils import processar_csv_scopus, processar_excel_wos
             
             # 1. Inicializa a barra de progresso
             pbar_load = st.progress(0, text="Iniciando integração de dados...")
@@ -111,6 +115,22 @@ with st.sidebar:
             if list_dfs:
                 with st.spinner("Consolidando estrutura final..."):
                     df_raw = pd.concat(list_dfs, ignore_index=True)
+
+                    # --- NOVO: UNIFICAÇÃO DE SEGURANÇA ---
+                    # Caso existam colunas antigas (REFERENCES ou CITED REFERENCES), unifica em uma só
+                    cols_para_unificar = ['REFERENCES', 'CITED REFERENCES', 'CR']
+                    if 'REFERENCES_UNIFIED' not in df_raw.columns:
+                        df_raw['REFERENCES_UNIFIED'] = ""
+                        
+                    for col in cols_para_unificar:
+                        if col in df_raw.columns:
+                            # Preenche a unificada com os dados da coluna encontrada, caso a unificada esteja vazia
+                            df_raw['REFERENCES_UNIFIED'] = df_raw['REFERENCES_UNIFIED'].fillna(df_raw[col])
+                            df_raw['REFERENCES_UNIFIED'] = df_raw['REFERENCES_UNIFIED'].replace("", df_raw[col])
+                    
+                    # Remove as colunas duplicadas para limpar a memória e a tabela
+                    df_raw = df_raw.drop(columns=[c for c in cols_para_unificar if c in df_raw.columns], errors='ignore')
+                    # -------------------------------------
                     
                     # Garante que o ano seja numérico para evitar erros nos gráficos
                     if 'YEAR CLEAN' not in df_raw.columns and 'YEAR' in df_raw.columns:
@@ -123,6 +143,48 @@ with st.sidebar:
                     st.rerun()
             else:
                 st.error("Não foi possível extrair dados dos arquivos selecionados.")
+            
+            # --- NOVO: MODO DE DEMONSTRAÇÃO ---
+    st.markdown("---")
+    st.subheader("🌟 Modo de Demonstração")
+    st.caption("Não tem arquivos agora? Explore o Simetrics com dados de exemplo.")
+    
+    if st.button("🚀 Carregar Ecossistema de Exemplo", help="Carrega automaticamente bases pré-configuradas (Scopus, WoS e SciELO) da pasta do projeto."):
+       
+        # Lista dos arquivos que devem estar na pasta raiz
+        arquivos_demo = ["scopus.ris", "wos.ris", "scielo.ris"]
+        mapping_demo = {
+            "scopus.ris": "Scopus", 
+            "wos.ris": "Web of Science", 
+            "scielo.ris": "SciELO"
+        }
+        
+        list_mock_files = []
+        
+        for nome in arquivos_demo:
+            if os.path.exists(nome):
+                with open(nome, "rb") as f:
+                    content = f.read()
+                    # Criamos um "mock" de UploadedFile para o processador de RIS
+                    mock_file = io.BytesIO(content)
+                    mock_file.name = nome
+                    list_mock_files.append(mock_file)
+            else:
+                st.sidebar.warning(f"Atenção: O arquivo '{nome}' não foi encontrado na raiz.")
+
+        if list_mock_files:
+            with st.spinner("Tecendo rede de demonstração..."):
+                # Reutilizamos a sua função existente do utils.py
+                
+                df_demo = process_multiple_ris(list_mock_files, mapping_demo)
+                
+                if df_demo is not None:
+                    # Atualiza o estado da aplicação com os dados de exemplo
+                    st.session_state['df_original'] = df_demo.copy()
+                    st.session_state['df_geral'] = df_demo
+                    st.session_state['df_duplicados'] = pd.DataFrame()
+                    st.success("Exemplo carregado com sucesso!")
+                    st.rerun()
 
 if st.session_state['df_geral'] is not None:
     df = st.session_state['df_geral']
@@ -188,6 +250,118 @@ if st.session_state['df_geral'] is not None:
 
             st.write("")
 
+        # =========================================================
+        # --- NOVO: PANORAMA DE COMPLETUDE DOS METADADOS ---
+        # =========================================================
+        st.markdown("##### 🗂️ Qualidade e Completude dos Metadados")
+        st.caption(f"Análise de dados faltantes em **{len(df)} documentos**. Metadados incompletos podem reduzir a precisão das redes de conhecimento.")
+        
+        # Mapeamento dos campos principais para análise
+        campos_verificacao = [
+            ('AUTHORS', 'Author (AU)'),
+            ('DOCUMENT TYPE', 'Document Type (DT)'),
+            ('ABSTRACT', 'Abstract (AB)'),
+            ('COUNTRY', 'Affiliation/Country (C1)'),
+            ('DOI', 'DOI (DI)'),
+            ('TITLE', 'Title (TI)'),
+            ('SECONDARY TITLE', 'Journal/Source (SO)'),
+            ('YEAR CLEAN', 'Publication Year (PY)'),
+            ('TOTAL CITATIONS', 'Total Citation (TC)'),
+            ('KEYWORDS', 'Keywords (DE/ID)'),
+            ('REFERENCES_UNIFIED', 'Cited References (CR)')
+        ]
+        
+        dados_completude = []
+        tot_docs = len(df)
+        
+        for col_chave, descricao in campos_verificacao:
+            if col_chave in df.columns:
+                # Conta valores nulos (NaN) e strings vazias/só com espaços
+                faltantes = df[col_chave].isna().sum() + (df[col_chave].astype(str).str.strip() == '').sum()
+            else:
+                # Se a coluna nem existir na base, 100% dos dados faltam
+                faltantes = tot_docs
+                
+            pct_faltante = (faltantes / tot_docs) * 100 if tot_docs > 0 else 0
+            
+            # Regras de Status (Inspiradas no Bibliometrix)
+            if pct_faltante == 0:
+                status = "Excelente"
+            elif pct_faltante <= 10:
+                status = "Bom"
+            elif pct_faltante <= 20:
+                status = "Aceitável"
+            else:
+                status = "Ruim"
+                
+            dados_completude.append({
+                "Metadado": descricao,
+                "Faltantes": int(faltantes),
+                "Faltantes (%)": pct_faltante,
+                "Status": status
+            })
+            
+        df_comp = pd.DataFrame(dados_completude).sort_values(by="Faltantes (%)")
+        
+        # Função para aplicar cores estilo "Semáforo" no Pandas
+        def colorir_status(val):
+            if val == 'Excelente': return 'background-color: #28a745; color: white; font-weight: bold;'
+            elif val == 'Bom': return 'background-color: #82e0aa; color: black; font-weight: bold;'
+            elif val == 'Aceitável': return 'background-color: #f1c40f; color: black; font-weight: bold;'
+            else: return 'background-color: #e74c3c; color: white; font-weight: bold;'
+            
+        # Aplica o estilo na coluna de Status e formata a porcentagem
+        tabela_estilizada = df_comp.style.map(colorir_status, subset=['Status']).format({'Faltantes (%)': "{:.2f}%"})
+        
+        # Exibe a tabela no Streamlit
+        st.dataframe(tabela_estilizada, use_container_width=True, hide_index=True)
+        st.divider()
+
+        # =========================================================
+        # --- INTELIGÊNCIA ARTIFICIAL: CATEGORIZAÇÃO TEMÁTICA ---
+        # =========================================================
+        st.markdown("##### 🤖 Inteligência Artificial: Categorização de Temas")
+        
+        with st.expander("Identificar Escolas de Pesquisa via Machine Learning", expanded=True):
+            api_key_valida = False
+            try:
+                api_key = st.secrets["GEMINI_API_KEY"]
+                api_key_valida = True
+            except KeyError:
+                st.error("Chave 'GEMINI_API_KEY' não encontrada.")
+            
+            # --- VERIFICAÇÃO DE DADOS EXISTENTES ---
+            # Importante: Buscamos a coluna diretamente no session_state para garantir a exibição
+            if 'TEMA_GEMINI' in st.session_state['df_original'].columns:
+                st.success("✅ O corpus foi categorizado com sucesso!")
+                
+                # Exibe a tabela de resumo sempre que a coluna existir
+                df_resumo = st.session_state['df_original']['TEMA_GEMINI'].value_counts().reset_index()
+                df_resumo.columns = ['Escola Temática (IA)', 'Documentos']
+                
+                st.markdown("###### 📊 Resumo da Distribuição")
+                st.dataframe(
+                    df_resumo.style.bar(subset=['Documentos'], color='#82c2c2'),
+                    use_container_width=True, 
+                    hide_index=True
+                )
+                
+                if st.button("Refazer Categorização (Limpar Temas)"):
+                    st.session_state['df_original'] = st.session_state['df_original'].drop(columns=['TEMA_GEMINI'])
+                    st.rerun()
+            
+            elif api_key_valida:
+                st.info("⚡ O algoritmo Silhouette identificará os grupos e o Gemini nomeará cada escola.")
+                if st.button("Executar Mapeamento Temático", type="primary"):
+                    from utils import categorizar_temas_por_cluster
+                    
+                    # CORREÇÃO CRÍTICA: Processamos e salvamos diretamente no df_original
+                    # Isso garante que a alteração seja global em todas as abas
+                    df_processado = categorizar_temas_por_cluster(st.session_state['df_original'], api_key)
+                    st.session_state['df_original'] = df_processado
+                    
+                    st.toast("Temas gerados com sucesso!", icon="🤖")
+                    st.rerun()
 
         # --- 1. CÁLCULO DE TODAS AS MÉTRICAS ---        
         total_docs = len(df)
@@ -429,7 +603,6 @@ if st.session_state['df_geral'] is not None:
             else:
                 st.info("ℹ️ Nenhuma informação de citação encontrada nos documentos para gerar este ranking.")
 
-        st.divider()
 
         # --- LINHA 3 DE GRÁFICOS: TOP PAÍSES E TOP VENUES LADO A LADO ---
         col_pais, col_venue = st.columns(2)
@@ -526,6 +699,55 @@ if st.session_state['df_geral'] is not None:
             else:
                 st.info("ℹ️ Nenhuma coluna de Local de Publicação (ex: SECONDARY TITLE, SO, JO) foi encontrada nos dados.")
 
+       # --- BLOCO: TOP 20 PALAVRAS-CHAVE ---
+        st.markdown("##### ☁️ Top 20 Palavras-chave")
+        
+        col_kw_opt, col_kw_fig = st.columns([1, 3])
+
+        with col_kw_opt:
+            # ATUALIZAÇÃO: De selectbox para radio
+            metric_kw = st.radio(
+                "Métrica de Ranking (Keywords):",
+                ["Qtd. de Documentos", "Total de Citações", "Média de Citações"],
+                key="sel_metric_kw_radio" # Alterado a key para evitar conflitos
+            )
+            st.info("💡 **Dica:** O gradiente lateral ajuda a identificar visualmente a distância de impacto entre o termo principal e os demais.")
+
+        with col_kw_fig:
+            with st.spinner("Mapeando léxico de impacto..."):
+                from utils import plot_top_keywords_metric
+                fig_kw = plot_top_keywords_metric(df, metric_kw, top_n=20)
+                
+                if fig_kw:
+                    st.plotly_chart(fig_kw, use_container_width=True)
+                else:
+                    st.warning("Não foram encontradas palavras-chave válidas.")
+
+        # --- BLOCO: COLABORAÇÃO ENTRE PAÍSES ---
+        st.divider()
+        st.markdown("##### 🌍 Redes de Colaboração Internacional")
+        st.caption("Investigue como a produção científica se articula geopoliticamente. O grafo circular evidencia as parcerias diretas, enquanto o mapa-múndi revela as pontes intercontinentais.")
+
+        col_circ, col_map = st.columns(2)
+
+        with col_circ:
+            with st.spinner("Desenhando matriz circular de países..."):
+                from utils import plot_circular_collaboration
+                fig_circ = plot_circular_collaboration(df, top_n=30)
+                if fig_circ:
+                    st.plotly_chart(fig_circ, use_container_width=True)
+                else:
+                    st.warning("Não há dados de países suficientes para formar redes de colaboração.")
+
+        with col_map:
+            with st.spinner("Renderizando mapa-múndi interativo..."):
+                from utils import plot_map_collaboration
+                fig_map = plot_map_collaboration(df, top_n=30)
+                if fig_map:
+                    st.plotly_chart(fig_map, use_container_width=True)
+                else:
+                    st.info("Aguardando conexões geográficas...")
+
         # --- LINHA 4 DE GRÁFICOS: NUVEM DE PALAVRAS ---
         st.divider()
         st.markdown("##### ☁️ Nuvem de Palavras")
@@ -536,7 +758,7 @@ if st.session_state['df_geral'] is not None:
             st.write("")
             fonte_nuvem = st.selectbox(
                 "Fonte de dados para a Nuvem:",
-                ["Títulos", "Palavras-chave", "Resumo (Abstract)"],
+                ["Títulos", "Palavras-chave", "Resumo (Abstract)", "Título + Resumo + Palavras-chave"],
                 key="sel_wordcloud"
             )
 
@@ -566,21 +788,31 @@ if st.session_state['df_geral'] is not None:
             
             paleta_escolhida = paletas[tema_cor]
             
-            # Mapeamento para as colunas reais do DataFrame
-            mapa_colunas = {
-                "Títulos": next((c for c in ['TITLE', 'TI'] if c in df.columns), None),
-                "Palavras-chave": next((c for c in ['KEYWORDS', 'KW', 'DE'] if c in df.columns), None),
-                "Resumo (Abstract)": next((c for c in ['ABSTRACT', 'AB'] if c in df.columns), None)
-            }
+            # --- LÓGICA DE MAPEAMENTO ATUALIZADA ---
+            # Identifica as colunas reais presentes no seu DataFrame
+            c_t = next((c for c in ['TITLE', 'TI'] if c in df.columns), None)
+            c_k = next((c for c in ['KEYWORDS', 'KW', 'DE'] if c in df.columns), None)
+            c_a = next((c for c in ['ABSTRACT', 'AB'] if c in df.columns), None)
+
+            if fonte_nuvem == "Título + Resumo + Palavras-chave":
+                # Filtra apenas as colunas que existem na base carregada
+                cols_para_unir = [c for c in [c_t, c_k, c_a] if c]
+                # Cria uma coluna temporária unindo os textos com espaços
+                df['WC_COMBINADO'] = df[cols_para_unir].fillna('').agg(' '.join, axis=1)
+                coluna_escolhida = 'WC_COMBINADO'
+            else:
+                mapa_colunas = {
+                    "Títulos": c_t,
+                    "Palavras-chave": c_k,
+                    "Resumo (Abstract)": c_a
+                }
+                coluna_escolhida = mapa_colunas.get(fonte_nuvem)
             
-            coluna_escolhida = mapa_colunas[fonte_nuvem]
             st.info(f"As 'Stopwords' em inglês são removidas automaticamente para destacar termos conceituais.")
 
         with col_wc_img:
             if coluna_escolhida and coluna_escolhida in df.columns:
                 with st.spinner("Pintando palavras e ajustando tipografia..."):
-                    from utils import gerar_nuvem_echarts
-                    from streamlit_echarts import st_echarts # Usamos a função base nativa!
                     
                     wc_opcoes = gerar_nuvem_echarts(
                         df, 
@@ -599,6 +831,102 @@ if st.session_state['df_geral'] is not None:
                         st.warning("Não há texto suficiente nesta coluna para gerar a nuvem.")
             else:
                 st.warning(f"A coluna de {fonte_nuvem} não foi encontrada nos dados.")
+
+        # =========================================================
+        # --- NOVO BLOCO: MAPAS CONCEITUAIS 2D E 3D ---
+        # =========================================================
+        st.divider()
+        st.markdown("##### 🧠 Estrutura Intelectual (Mapa Conceitual PCA)")
+        st.caption("A Análise de Componentes Principais (PCA) reduz a base a dimensões espaciais. Termos agrupados na mesma cor pertencem à mesma escola temática (K-Means Clustering).")
+
+        col_config_mapa, col_mapas_graf = st.columns([1, 4])
+        
+        with col_config_mapa:
+            top_termos_mapa = st.slider("Quantidade de Termos:", min_value=20, max_value=100, value=50, step=10, key='sl_mapa_termos', help="Foca a matemática nos termos mais frequentes para evitar ruído.")
+            num_clusters = st.slider("Qtd. de Escolas (Clusters):", min_value=2, max_value=8, value=3, step=1, key='sl_mapa_clusters')
+            st.info("💡 **Dica 3D:** Arraste o gráfico tridimensional para rotacionar, descobrir profundidade e ver quais termos atuam como 'ponte' entre os clusters principais.")
+            
+        with col_mapas_graf:
+            with st.spinner("Extraindo matriz semântica e calculando dimensionalidade..."):
+                from utils import gerar_mapas_conceituais
+                fig_2d, fig_3d = gerar_mapas_conceituais(df, top_n_words=top_termos_mapa, n_clusters=num_clusters)
+                
+                if fig_2d and fig_3d:
+                    c2d, c3d = st.columns(2)
+                    with c2d:
+                        st.markdown("**Projeção Plana (2D)**")
+                        st.plotly_chart(fig_2d, use_container_width=True)
+                    with c3d:
+                        st.markdown("**Projeção Imersiva (3D)**")
+                        st.plotly_chart(fig_3d, use_container_width=True)
+                else:
+                    st.warning("Não há palavras-chave válidas ou diversidade suficiente na amostra para processar a topologia matemática.")
+
+        # =========================================================
+        # --- AUTORES: PRODUÇÃO NO TEMPO E LEI DE LOTKA ---
+        # =========================================================
+        st.divider()
+        st.markdown("##### ✍️ Dinâmica de Autoria e Produtividade Científica")
+        
+        col_lotka, col_prod = st.columns([1, 1.2]) # Produção ganha levemente mais espaço
+        
+        with col_lotka:
+            st.caption("A **Lei de Lotka** compara a distribuição teórica da produtividade (linha vermelha tracejada) com o que ocorre na sua base (linha azul). É esperado que muitos autores publiquem apenas um artigo, e pouquíssimos publiquem muitos.")
+            with st.spinner("Calculando constante da Lei de Lotka..."):
+                from utils import plot_lotkas_law
+                fig_lotka = plot_lotkas_law(df)
+                if fig_lotka:
+                    st.plotly_chart(fig_lotka, use_container_width=True)
+                else:
+                    st.info("Dados insuficientes para gerar a Lei de Lotka.")
+                    
+        with col_prod:
+            st.caption("O tamanho da bolha indica o volume de documentos publicados no ano, e a cor indica o volume total de citações recebidas. A linha horizontal marca o início e fim da atuação.")
+            with st.spinner("Mapeando constância acadêmica..."):
+                from utils import plot_author_production_over_time
+                fig_prod = plot_author_production_over_time(df, top_n=15)
+                if fig_prod:
+                    st.plotly_chart(fig_prod, use_container_width=True)
+                else:
+                    st.info("Dados insuficientes para mapear a produção ao longo do tempo.")
+
+
+        # --- HISTORIÓGRAFO (REDE DIRETA DE CITAÇÕES) ---
+        st.divider()
+        st.markdown("##### 🕰️ Histórico de Citações Diretas (Historiograph)")
+        st.caption("Mapeamento cronológico dos documentos mais influentes da amostra. Os links representam o fluxo hereditário de ideias (quando um documento mais recente cita o autor principal de um documento seminal anterior).")
+
+        col_hist_sel, col_hist_graf = st.columns([1, 3])
+        
+        # Estatísticas e Tabela Bruta (Da base já limpa, caso tenha rodado a limpeza)
+        if 'TOTAL CITATIONS' in df.columns:
+            stats_df = df['TOTAL CITATIONS'].dropna()
+            if not stats_df.empty:
+                e1, e2, e3, e4 = st.columns(4)
+                e1.metric("Média de Citações", f"{stats_df.mean():.2f}")
+                e2.metric("Mediana", f"{stats_df.median():.2f}")
+                e3.metric("Desvio Padrão", f"{stats_df.std():.2f}")
+                e4.metric("Máximo", f"{stats_df.max():.0f}")
+
+        with col_hist_sel:
+            st.write("")
+            top_n_hist = st.slider(
+                "Documentos Analisados:", 
+                min_value=10, max_value=100, value=30, step=10,
+                key="slider_historiograph",
+                help="Aumente para visualizar a malha histórica completa. Valores muito altos podem poluir visualmente o gráfico."
+            )
+            st.info("💡 **Leitura:** O eixo X é a linha do tempo. Documentos maiores são os mais citados da rede, servindo como os pilares do ecossistema de conhecimento.")
+            
+        with col_hist_graf:
+            with st.spinner("Desenhando linha do tempo das citações..."):
+                from utils import gerar_historiograph
+                fig_hist = gerar_historiograph(df, top_n=top_n_hist)
+                
+                if fig_hist:
+                    st.plotly_chart(fig_hist, use_container_width=True)
+                else:
+                    st.warning("Não foi possível traçar a rede histórica. Certifique-se de que sua base contém a coluna de 'Referências' (Cited References).")
 
         # --- LINHA 5 DE GRÁFICOS: MAPA TEMÁTICO (BIBLIOMETRIX STYLE) ---
         st.divider()
@@ -633,7 +961,6 @@ if st.session_state['df_geral'] is not None:
         with col_mapa_graf:
             if coluna_mapa_escolhida and coluna_mapa_escolhida in df.columns:
                 with st.spinner("Extraindo comunidades de conhecimento e calculando coordenadas..."):
-                    from utils import gerar_mapa_tematico
                     
                     fig_mapa = gerar_mapa_tematico(df, coluna_texto=coluna_mapa_escolhida, n_palavras=n_termos_mapa)
                     
@@ -645,25 +972,81 @@ if st.session_state['df_geral'] is not None:
                 st.warning(f"Coluna de {fonte_mapa} não encontrada na base de dados.")
 
         # =========================================================
-        # MÓDULO DE DEDUPLICAÇÃO E TABELAS
-        # =========================================================
-        st.markdown("### 📋 Tabela Completa e Estatísticas de Citação")
+        # MÓDULO DE TABELAS E ESTATÍSTICAS DETALHADAS
+        # =========================================================            
+        st.markdown("### 📋 Tabelas Analíticas e Estatísticas")
+        st.caption("Navegue pelas abas abaixo para investigar os dados agregados por diferentes dimensões do ecossistema científico.")
         
-        # Estatísticas e Tabela Bruta (Da base já limpa, caso tenha rodado a limpeza)
-        if 'TOTAL CITATIONS' in df.columns:
-            stats_df = df['TOTAL CITATIONS'].dropna()
-            if not stats_df.empty:
-                e1, e2, e3, e4 = st.columns(4)
-                e1.metric("Média de Citações", f"{stats_df.mean():.2f}")
-                e2.metric("Mediana", f"{stats_df.median():.2f}")
-                e3.metric("Desvio Padrão", f"{stats_df.std():.2f}")
-                e4.metric("Máximo", f"{stats_df.max():.0f}")
+        df = st.session_state['df_original']
         
-        st.markdown("##### 📚 Base de Dados Ativa")
-        cols = [c for c in df.columns if c != 'YEAR CLEAN']
-        if 'TOTAL CITATIONS' in cols: cols.insert(0, cols.pop(cols.index('TOTAL CITATIONS')))
-        st.dataframe(df[cols], use_container_width=True)
-        st.download_button("Baixar Base Unificada (CSV)", data=df[cols].to_csv(index=False).encode('utf-8'), file_name='base_integrada.csv')
+        # Criação das Abas
+        aba_geral, aba_autores, aba_paises, aba_venues, aba_keywords = st.tabs([
+            "📚 Tabela Geral", 
+            "✍️ Autores", 
+            "🌍 Países", 
+            "🏛️ Fontes (Venues)", 
+            "🔑 Palavras-chave"
+        ])
+        
+        # --- ABA 1: TABELA GERAL ---
+        with aba_geral:
+            cols = [c for c in df.columns if c != 'YEAR CLEAN']
+            prioridades = ['TEMA_GEMINI', 'TOTAL CITATIONS', 'TITLE', 'AUTHORS']
+            for col_prioritaria in reversed(prioridades):
+                if col_prioritaria in cols:
+                    cols.insert(0, cols.pop(cols.index(col_prioritaria)))
+            
+            st.dataframe(df[cols], use_container_width=True)
+            csv_geral = df[cols].to_csv(index=False).encode('utf-8')
+            st.download_button("Baixar Base Geral (CSV)", data=csv_geral, file_name='base_simetrics_geral.csv', key='dl_geral')
+
+        # --- ABA 2: AUTORES ---
+        with aba_autores:
+            with st.spinner("Compilando perfil estatístico dos autores..."):
+                from utils import gerar_tabela_autores
+                df_autores = gerar_tabela_autores(df)
+                if not df_autores.empty:
+                    st.dataframe(df_autores, use_container_width=True, hide_index=True)
+                    csv_autores = df_autores.to_csv(index=False).encode('utf-8')
+                    st.download_button("Baixar Tabela de Autores (CSV)", data=csv_autores, file_name='simetrics_autores.csv', key='dl_aut')
+                else:
+                    st.info("Não há dados de autores suficientes para gerar esta tabela.")
+
+        # --- ABA 3: PAÍSES ---
+        with aba_paises:
+            with st.spinner("Compilando estatísticas geopolíticas..."):
+                from utils import gerar_tabela_paises
+                df_paises = gerar_tabela_paises(df)
+                if not df_paises.empty:
+                    st.dataframe(df_paises, use_container_width=True, hide_index=True)
+                    csv_paises = df_paises.to_csv(index=False).encode('utf-8')
+                    st.download_button("Baixar Tabela de Países (CSV)", data=csv_paises, file_name='simetrics_paises.csv', key='dl_pai')
+                else:
+                    st.info("Não há dados de países (COUNTRY) suficientes para gerar esta tabela.")
+
+        # --- ABA 4: FONTES / VENUES ---
+        with aba_venues:
+            with st.spinner("Agrupando periódicos e conferências..."):
+                from utils import gerar_tabela_venues
+                df_venues = gerar_tabela_venues(df)
+                if not df_venues.empty:
+                    st.dataframe(df_venues, use_container_width=True, hide_index=True)
+                    csv_venues = df_venues.to_csv(index=False).encode('utf-8')
+                    st.download_button("Baixar Tabela de Fontes/Venues (CSV)", data=csv_venues, file_name='simetrics_venues.csv', key='dl_ven')
+                else:
+                    st.info("Não há dados de fontes de publicação (SECONDARY TITLE) suficientes para gerar esta tabela.")
+
+        # --- ABA 5: PALAVRAS-CHAVE ---
+        with aba_keywords:
+            with st.spinner("Calculando impacto do léxico..."):
+                from utils import gerar_tabela_keywords
+                df_keywords = gerar_tabela_keywords(df)
+                if not df_keywords.empty:
+                    st.dataframe(df_keywords, use_container_width=True, hide_index=True)
+                    csv_keywords = df_keywords.to_csv(index=False).encode('utf-8')
+                    st.download_button("Baixar Tabela de Palavras-chave (CSV)", data=csv_keywords, file_name='simetrics_keywords.csv', key='dl_kw')
+                else:
+                    st.info("Não há palavras-chave (KEYWORDS) suficientes para gerar esta tabela.")
 
     # === ABA 2: REDES E GRAFOS ===
     with tab_grafos:
@@ -671,114 +1054,141 @@ if st.session_state['df_geral'] is not None:
         col_opcoes, col_grafo = st.columns([1, 3])
         
         with col_opcoes:
-            tipo_grafo = st.selectbox("Mapear:", ["Rede de Coautoria", "Coocorrência de Palavras-chave"])
-            top_n_nodes = st.slider("Top N Nós:", 10, 150, 50, 5)
-            metric_for_size = st.selectbox("Basear tamanho do nó em:", ["Tamanho Fixo", "Grau Absoluto", "Centralidade (Eigen)", "Betweenness", "Closeness"])
-            
-            # NOVO: Controle de estabilização do grafo (Física do vis.js)
-            estabilizar_grafo = st.checkbox(
-                "❄️ Congelar Grafo", 
-                value=False, 
-                help="Marque para desativar a simulação física após o carregamento. Isso impede que os nós fiquem se movendo 'loucamente' e facilita a leitura."
+            # 1. Adicionamos a opção no Selectbox
+            tipo_grafo = st.selectbox(
+                "Mapear:", 
+                ["Rede de Coautoria", "Coocorrência de Palavras-chave", "Rede de Cocitação"]
             )
             
-            coluna_alvo = "AUTHORS" if tipo_grafo == "Rede de Coautoria" else None
-            if not coluna_alvo:
+            top_n_nodes = st.slider("Top N Nós:", 10, 150, 50, 5)
+            metric_for_size = st.selectbox(
+                "Basear tamanho do nó em:", 
+                ["Tamanho Fixo", "Grau Absoluto", "Centralidade (Eigen)", "Betweenness", "Closeness"]
+            )
+            
+            # 2. Lógica de busca da coluna alvo atualizada
+            coluna_alvo = None
+            
+            if tipo_grafo == "Rede de Coautoria":
+                coluna_alvo = "AUTHORS"
+            elif tipo_grafo == "Rede de Cocitação":
+                # Busca variações comuns de nomes de colunas de referências
+                for col in ['REFERENCES', 'CITED REFERENCES']:
+                    if col in df.columns: 
+                        coluna_alvo = col
+                        break
+            else: # Coocorrência de Palavras-chave
                 for col in ['KEYWORDS', 'KW', 'DE']:
-                    if col in df.columns: coluna_alvo = col; break
+                    if col in df.columns: 
+                        coluna_alvo = col
+                        break
+
+            # Feedback visual caso a coluna não exista na base carregada
+            if not coluna_alvo:
+                st.warning(f"⚠️ A coluna necessária para '{tipo_grafo}' não foi encontrada na sua base de dados.")
 
         with col_grafo:
             if coluna_alvo and coluna_alvo in df.columns:
-                
-                # NOVO: Barra de progresso visual para a construção do grafo
-                pbar_grafo = st.progress(0, text="Iniciando construção da rede...")
-                
-                # Passamos o objeto _pbar para a função atualizada
-                nodes, edges, df_nodes, net_metrics = criar_grafo_e_metricas(
-                    df, coluna_alvo, top_n_nodes, metric_for_size, _pbar=pbar_grafo
-                )
-                
-                # Removemos a barra de progresso após o cálculo terminar
-                pbar_grafo.empty()
-                
-                if len(nodes) > 0:
-                    config = Config(
-                        width="100%", 
-                        height=700, 
-                        directed=False, 
-                        hierarchical=False,
-                        navigationButtons=True, 
-                        
-                        # NOVO: O parâmetro physics recebe o inverso do checkbox
-                        # Se "Congelar" for True, physics é False (o grafo para de se mexer)
-                        physics=not estabilizar_grafo, 
-                        
-                        interaction={
-                            "hover": True, 
-                            "zoomView": True, 
-                            "dragView": True,
-                            "navigationButtons": True 
-                        },
-                        nodeHighlightBehavior=True,
-                        highlightColor="#F7A7A6",
-                        stabilization=True,
-                                                
-                        edges={
-                            "smooth": {
-                                "enabled": True,
-                                "type": "dynamic" 
+                with st.spinner("Calculando topologia SNA..."):
+                    
+                    # ATUALIZAÇÃO: A função agora retorna 5 elementos (incluindo o G_obj)
+                    from utils import criar_grafo_e_metricas, plot_grafo_estatico
+                    nodes, edges, df_nodes, net_metrics, G_obj = criar_grafo_e_metricas(df, coluna_alvo, top_n_nodes, metric_for_size)
+                    
+                    if len(nodes) > 0:
+                        config = Config(
+                            width="100%", 
+                            height=700, 
+                            directed=False, 
+                            hierarchical=False,
+                            navigationButtons=True, 
+                            interaction={
+                                "hover": True, 
+                                "zoomView": True, 
+                                "dragView": True,
+                                "navigationButtons": True 
+                            },
+                            nodeHighlightBehavior=True,
+                            highlightColor="#F7A7A6",
+                            stabilization=True,
+                            edges={
+                                "smooth": {
+                                    "enabled": True,
+                                    "type": "dynamic" 
+                                }
                             }
-                        }
-                    )
+                        )
+                        
+                        # 1. Grafo Dinâmico (Agora com Tooltips ao passar o mouse!)
+                        agraph(nodes=nodes, edges=edges, config=config)
+                        
+                        # 2. Grafo Estático (Exportável para Tese/Artigos)
+                        st.markdown("### 📸 Instantâneo da Rede (Estilo VOSviewer)")
+                        st.caption("Esta versão estática agrupa os nós em cores por **comunidade** (Algoritmo de Louvain). Clique com o botão direito para salvar a imagem em alta resolução.")
+                        
+                        with st.spinner("Desenhando instantâneo de alta resolução..."):
+                            titulo_grafo = f"Rede Estática: {tipo_grafo}"
+                            fig_estatica = plot_grafo_estatico(G_obj, titulo=titulo_grafo)
+                            if fig_estatica:
+                                st.pyplot(fig_estatica)
+                            else:
+                                st.info("Não foi possível gerar a versão estática.")
 
-                    agraph(nodes=nodes, edges=edges, config=config)
-                else: 
-                    st.warning("Sem conexões suficientes.")
-            else: 
-                st.warning("Coluna não encontrada.")
+                    else: st.warning("Sem conexões suficientes.")
+            else: st.warning("Coluna não encontrada.")
 
         st.divider()
         st.markdown("### 📊 Tabela de Nós e Métricas SNA (Rede Heterogênea)")
-        st.caption("Esta tabela integra Autores, Documentos, Países e Venues, permitindo comparar a influência transversal de diferentes entidades.")
+        st.caption("Esta tabela integra Autores, Documentos, Países e Venues, permitindo comparar a influência transversal de diferentes entidades. Por exigir alto processamento, o cálculo é feito sob demanda.")
         
-        # NOVO: Barra de progresso para o cálculo da tabela complexa
-        pbar_sna = st.progress(0, text="Calculando centralidades do ecossistema...")
-        
-        # Passamos a barra para a função
-        df_metricas = gerar_tabela_metricas_completas(df, _pbar=pbar_sna)
-        
-        # Removemos a barra ao terminar
-        pbar_sna.empty()
+        # Cria um espaço na memória da sessão para guardar a tabela gerada
+        if "tabela_sna_completa" not in st.session_state:
+            st.session_state["tabela_sna_completa"] = None
 
-        if not df_metricas.empty:
-            # Filtro rápido por tipo para o usuário
-            tipos_disponiveis = ["Todos"] + sorted(df_metricas["Tipo"].unique().tolist())
-            filtro_tipo = st.selectbox("Filtrar por Tipo de Item:", tipos_disponiveis)
-
-            df_filtrado = df_metricas if filtro_tipo == "Todos" else df_metricas[df_metricas["Tipo"] == filtro_tipo]
-
-            # Exibição da Tabela com a configuração correta de colunas
-            st.dataframe(
-                df_filtrado,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Item": st.column_config.TextColumn("Item"),
-                    "Tipo": st.column_config.TextColumn("Tipo"),
-                    "Grau Absoluto": st.column_config.NumberColumn("Grau Absoluto", format="%d"),
-                    "Grau Centralidade": st.column_config.NumberColumn("Grau Centralidade", format="%.4f"),
-                    "Betweenness": st.column_config.NumberColumn("Betweenness", format="%.4f"),
-                    "Closeness": st.column_config.NumberColumn("Closeness", format="%.4f")
-                }
-            )
+        # Botão de Ação
+        if st.button("🚀 Iniciar Cálculo da Tabela SNA Completa", type="primary"):
+            pbar_sna = st.progress(0, text="Calculando centralidades de todo o ecossistema...")
             
-            st.download_button(
-                "Baixar Relatório SNA (CSV)",
-                data=df_filtrado.to_csv(index=False).encode('utf-8'),
-                file_name="metricas_sna_ecossistema.csv"
-            )
+            # Executa o cálculo e guarda na memória da sessão
+            st.session_state["tabela_sna_completa"] = gerar_tabela_metricas_completas(df, _pbar=pbar_sna)
+            
+            pbar_sna.empty() # Remove a barra ao terminar
+
+        # Renderização da Tabela (Ocorre se a tabela já existir na memória)
+        if st.session_state["tabela_sna_completa"] is not None:
+            df_metricas = st.session_state["tabela_sna_completa"]
+            
+            if not df_metricas.empty:
+                # Filtro rápido por tipo para o usuário
+                tipos_disponiveis = ["Todos"] + sorted(df_metricas["Tipo"].unique().tolist())
+                filtro_tipo = st.selectbox("Filtrar por Tipo de Item:", tipos_disponiveis)
+
+                df_filtrado = df_metricas if filtro_tipo == "Todos" else df_metricas[df_metricas["Tipo"] == filtro_tipo]
+
+                # Exibição da Tabela com a configuração correta de colunas
+                st.dataframe(
+                    df_filtrado,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Item": st.column_config.TextColumn("Item"),
+                        "Tipo": st.column_config.TextColumn("Tipo"),
+                        "Grau Absoluto": st.column_config.NumberColumn("Grau Absoluto", format="%d"),
+                        "Grau Centralidade": st.column_config.NumberColumn("Grau Centralidade", format="%.4f"),
+                        "Betweenness": st.column_config.NumberColumn("Betweenness", format="%.4f"),
+                        "Closeness": st.column_config.NumberColumn("Closeness", format="%.4f")
+                    }
+                )
+                
+                st.download_button(
+                    "📥 Baixar Relatório SNA (CSV)",
+                    data=df_filtrado.to_csv(index=False).encode('utf-8'),
+                    file_name="metricas_sna_ecossistema.csv"
+                )
+            else:
+                st.warning("Não há dados suficientes para calcular a rede heterogênea.")
         else:
-            st.warning("Não há dados suficientes para calcular a rede heterogênea.")
+            st.info("A tabela está em modo de espera. Clique no botão azul acima para iniciar o processamento topológico.")
 
     # Inicializa o estado de busca se não existir
     if 'busca_tipo_biblio' not in st.session_state:
@@ -844,7 +1254,6 @@ if st.session_state['df_geral'] is not None:
         # Usamos cache_resource porque grafos são objetos complexos de rede, não apenas dados tubulares.
         @st.cache_resource 
         def obter_grafo_global(df_dados):
-            import networkx as nx
             G = nx.Graph()
             colunas_necessarias = [c for c in [col_titulos, col_autores, col_paises, col_venue] if c is not None]
             records = df_dados[colunas_necessarias].to_dict('records')
@@ -877,7 +1286,6 @@ if st.session_state['df_geral'] is not None:
             
             def calcular_sna_instantaneo(G, termo):
                 """Calcula métricas localizadas baseadas no Grafo Global pré-carregado."""
-                import networkx as nx
                 if termo not in G: return None
                 
                 grau_abs = G.degree(termo)
@@ -891,8 +1299,6 @@ if st.session_state['df_geral'] is not None:
                 clos = nx.closeness_centrality(ego_net).get(termo, 0)
                 
                 return {"Grau Absoluto": grau_abs, "Centralidade Grau": cent_grau, "Betweenness": betw, "Closeness": clos}
-
-            metricas_sna = calcular_sna_instantaneo(grafo_global, termo_ativo)
 
             # --- RENDERIZAÇÃO DO PERFIL (COLUNA ESQUERDA) ---
             with col_info:
@@ -934,7 +1340,6 @@ if st.session_state['df_geral'] is not None:
                     for _, r in docs_autor.iterrows():
                         if pd.notna(r[col_autores]):
                             parceiros.extend([a.strip() for a in str(r[col_autores]).split(';') if a.strip() and a.strip() != termo_ativo])
-                    from collections import Counter
                     top_parceiros = Counter(parceiros).most_common(5)
                     
                     if top_parceiros:
@@ -970,13 +1375,23 @@ if st.session_state['df_geral'] is not None:
             # --- RENDERIZAÇÃO DAS MÉTRICAS SNA (COLUNA DIREITA) ---
             with col_sna:
                 st.markdown("##### 🕸️ Métricas Topológicas (SNA)")
-                if metricas_sna:
-                    st.metric("Grau Absoluto (Conexões)", metricas_sna['Grau Absoluto'], help="Total de conexões diretas desta entidade na rede.")
-                    st.metric("Centralidade de Grau", f"{metricas_sna['Centralidade Grau']:.4f}", help="Proporção da rede com a qual esta entidade se conecta diretamente.")
-                    st.metric("Betweenness Centrality", f"{metricas_sna['Betweenness']:.4f}", help="Capacidade de agir como 'ponte' no fluxo de informação entre outros nós.")
-                    st.metric("Closeness Centrality", f"{metricas_sna['Closeness']:.4f}", help="O quão perto (em saltos) esta entidade está de todas as outras na rede.")
+                
+                # Botão sob demanda
+                if st.button(f"⚙️ Calcular SNA para: {termo_ativo}", key=f"btn_calc_sna_{hash(termo_ativo)}", use_container_width=True):
+                    with st.spinner("Analisando centralidade na rede..."):
+                        metricas_sna = calcular_sna_instantaneo(grafo_global, termo_ativo)
+                        
+                        if metricas_sna:
+                            st.metric("Grau Absoluto (Conexões)", metricas_sna['Grau Absoluto'], help="Total de conexões diretas desta entidade na rede.")
+                            st.metric("Centralidade de Grau", f"{metricas_sna['Centralidade Grau']:.4f}", help="Proporção da rede com a qual esta entidade se conecta diretamente.")
+                            st.metric("Betweenness Centrality", f"{metricas_sna['Betweenness']:.4f}", help="Capacidade de agir como 'ponte' no fluxo de informação entre outros nós.")
+                            st.metric("Closeness Centrality", f"{metricas_sna['Closeness']:.4f}", help="O quão perto (em saltos) esta entidade está de todas as outras na rede.")
+                        else:
+                            st.warning("Métricas isoladas/não aplicáveis.")
                 else:
-                    st.warning("Métricas isoladas/não aplicáveis.")
+                    st.info("Aperte o botão acima para calcular o impacto topológico (Grau, Betweenness, Closeness) desta entidade específica no ecossistema.")
+
+            st.markdown("---")
 
             # =========================================================
             # ABAS DO DOSSIÊ (HISTÓRICO, NUVEM E SIMILARES)
@@ -1024,9 +1439,7 @@ if st.session_state['df_geral'] is not None:
                     df_ano = df_ano.dropna(subset=[col_ano])
                     
                     if not df_ano.empty:
-                        import plotly.graph_objects as go
-                        import plotly.express as px
-                        
+                    
                         if visao_hist == "Visão Geral":
                             if 'TOTAL CITATIONS' in df_ano.columns:
                                 hist_data = df_ano.groupby(col_ano).agg(Volume=(col_titulos, 'count'), Citacoes=('TOTAL CITATIONS', 'sum')).reset_index()
@@ -1100,8 +1513,7 @@ if st.session_state['df_geral'] is not None:
                 subset_df_wc = pd.DataFrame({'TEXTO_COMBINADO': [texto_final_vetorizado]})
 
                 with st.spinner("Gerando nuvem de palavras específica..."):
-                    from utils import gerar_nuvem_echarts
-                    from streamlit_echarts import st_echarts
+                  
                     
                     wc_opcoes = gerar_nuvem_echarts(
                         subset_df_wc, 
@@ -1121,7 +1533,6 @@ if st.session_state['df_geral'] is not None:
                 st.caption("A proximidade é calculada pelo **Índice de Jaccard**, que mede a sobreposição estrutural de palavras-chave, coautorias e locais de publicação na sua base bibliométrica.")
                 
                 with st.spinner("Calculando similaridade vetorial na rede..."):
-                    from utils import calcular_similares_biblio
                     similares = calcular_similares_biblio(termo_ativo, tipo_ativo, df)
                     
                 def render_tabela_similares(lista_dados, titulo_coluna_item, tipo_nav):
