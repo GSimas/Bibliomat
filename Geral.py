@@ -283,13 +283,12 @@ if st.session_state['df_geral'] is not None:
             except KeyError:
                 st.error("Chave 'GEMINI_API_KEY' não encontrada.")
             
-            # --- VERIFICAÇÃO DE DADOS EXISTENTES ---
-            # Importante: Buscamos a coluna diretamente no session_state para garantir a exibição
-            if 'TEMA_GEMINI' in st.session_state['df_original'].columns:
+            # --- CORREÇÃO: Lendo e gravando na base ATIVA (df_geral) ---
+            if 'TEMA_GEMINI' in st.session_state['df_geral'].columns:
                 st.success("✅ O corpus foi categorizado com sucesso!")
                 
                 # Exibe a tabela de resumo sempre que a coluna existir
-                df_resumo = st.session_state['df_original']['TEMA_GEMINI'].value_counts().reset_index()
+                df_resumo = st.session_state['df_geral']['TEMA_GEMINI'].value_counts().reset_index()
                 df_resumo.columns = ['Escola Temática (IA)', 'Documentos']
                 
                 st.markdown("###### 📊 Resumo da Distribuição")
@@ -300,7 +299,7 @@ if st.session_state['df_geral'] is not None:
                 )
                 
                 if st.button("Refazer Categorização (Limpar Temas)"):
-                    st.session_state['df_original'] = st.session_state['df_original'].drop(columns=['TEMA_GEMINI'])
+                    st.session_state['df_geral'] = st.session_state['df_geral'].drop(columns=['TEMA_GEMINI'])
                     st.rerun()
             
             elif api_key_valida:
@@ -308,10 +307,9 @@ if st.session_state['df_geral'] is not None:
                 if st.button("Executar Mapeamento Temático", type="primary"):
                     from utils import categorizar_temas_por_cluster
                     
-                    # CORREÇÃO CRÍTICA: Processamos e salvamos diretamente no df_original
-                    # Isso garante que a alteração seja global em todas as abas
-                    df_processado = categorizar_temas_por_cluster(st.session_state['df_original'], api_key)
-                    st.session_state['df_original'] = df_processado
+                    # CORREÇÃO: Passando a base já deduplicada para a IA não analisar textos repetidos
+                    df_processado = categorizar_temas_por_cluster(st.session_state['df_geral'], api_key)
+                    st.session_state['df_geral'] = df_processado
                     
                     st.toast("Temas gerados com sucesso!", icon="🤖")
                     st.rerun()
@@ -905,7 +903,8 @@ if st.session_state['df_geral'] is not None:
         st.markdown("### 📋 Tabelas Analíticas e Estatísticas")
         st.caption("Navegue pelas abas abaixo para investigar os dados agregados por diferentes dimensões do ecossistema científico.")
         
-        df = st.session_state['df_original']
+        # CORREÇÃO: Força as tabelas a usarem a base ativa (com filtros, IA e deduplicação aplicados)
+        df = st.session_state['df_geral']
         
         # Criação das Abas
         aba_geral, aba_autores, aba_paises, aba_venues, aba_keywords = st.tabs([
