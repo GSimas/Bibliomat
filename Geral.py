@@ -47,6 +47,18 @@ def create_kpi_card(title, value, color="#f0f2f6", text_color="#31333F", subtitl
     </div>
     """, unsafe_allow_html=True)
 
+
+def get_gemini_api_key():
+    env_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if env_key:
+        return env_key
+
+    try:
+        secret_key = str(st.secrets["GEMINI_API_KEY"]).strip()
+        return secret_key or None
+    except Exception:
+        return None
+
 def resetar_estado_derivado():
     st.session_state['df_duplicados'] = pd.DataFrame()
     st.session_state['tabela_sna_completa'] = None
@@ -277,8 +289,7 @@ if st.session_state['df_geral'] is not None:
         st.markdown("##### 🤖 Inteligência Artificial: Categorização de Temas")
         
         with st.expander("Identificar Escolas de Pesquisa via Machine Learning", expanded=True):
-            # Tenta obter a chave de forma segura
-            api_key = st.secrets.get("GEMINI_API_KEY")
+            api_key = get_gemini_api_key()
             
             if not api_key:
                 api_key_valida = False
@@ -1613,9 +1624,8 @@ if st.session_state['df_geral'] is not None:
         st.header("🤖 Assistente Científico (Simetrics AI)")
         st.caption("Converse com a base de dados. Peça recomendações de leitura, indicação de especialistas ou sugestões de periódicos (venues) para submeter seu artigo com base no seu tema de pesquisa atual. \n ⚠️ Esteja ciente de que a qualidade das respostas depende da qualidade dos dados carregados. Este chatbot pode errar, sempre verifique as informações.")
 
-        # 1. Verificação Segura da Chave de API
-        # Usamos .get() para evitar o erro fatal StreamlitSecretNotFoundError no deploy (Railway)
-        api_key = st.secrets.get("GEMINI_API_KEY")
+        # 1. Verificação segura da chave de API
+        api_key = get_gemini_api_key()
 
         if not api_key:
             st.warning("⚠️ O Assistente Científico está desativado. Certifique-se de que a 'GEMINI_API_KEY' está configurada nas Variáveis de Ambiente do Railway ou nos Secrets do Streamlit.")
