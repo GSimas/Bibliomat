@@ -437,11 +437,26 @@ def padronizar_base_bibliometrica(df):
 
     df_padrao = df.copy()
 
-    # --- CORREÇÃO DEFINITIVA (VACINA) ---
-    # Identifica colunas com nomes idênticos e mantém apenas a primeira.
-    # Isso impede que o erro "DataFrame object has no attribute 'str'" aconteça em qualquer parte do sistema.
+    # 1. PROTECAO CONTRA COLUNAS DUPLICADAS
     df_padrao = df_padrao.loc[:, ~df_padrao.columns.duplicated()].copy()
 
+    # 2. PROTECAO CONTRA CRASH DE MEMÓRIA / CACHE (Unhashable Type: List)
+    # Detecta qualquer coluna que tenha sobrado como lista ou dicionário e a converte para texto.
+    # Isso resolve o erro fatal do Streamlit ao tentar hashear (fazer cache) de arquivos de +50MB.
+    for col in df_padrao.columns:
+        if not df_padrao[col].dropna().empty:
+            primeiro_valido = df_padrao[col].dropna().iloc[0]
+            if isinstance(primeiro_valido, (list, dict, tuple)):
+                df_padrao[col] = df_padrao[col].astype(str)
+
+    # 3. PROTECAO CONTRA KEYERROR (Eixos de Gráficos)
+    # Força a existência matemática da coluna de citações, independentemente da base lida.
+    if 'TOTAL CITATIONS' not in df_padrao.columns:
+        df_padrao['TOTAL CITATIONS'] = 0
+    else:
+        df_padrao['TOTAL CITATIONS'] = pd.to_numeric(df_padrao['TOTAL CITATIONS'], errors='coerce').fillna(0)
+
+    # 4. Unificação de Referências (Mantido do seu código original)
     ref_candidates = ['REFERENCES_UNIFIED', 'REFERENCES', 'CITED REFERENCES', 'CR']
     if any(col in df_padrao.columns for col in ref_candidates):
         series_ref = None

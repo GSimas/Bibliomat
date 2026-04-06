@@ -89,6 +89,7 @@ with st.sidebar:
         | **.txt / .nbib**| PubMed (Formato Medline) |
         
         **Dicas Importantes:**
+        * O limite de processamento é 10000 linhas, ou seja, 10000 documentos
         * **WoS:** Para Excel, certifique-se de exportar com 'Full Record and Cited References'.
         * **PubMed:** Use a opção de exportação 'Format: PubMed' no site da NCBI.
         """)
