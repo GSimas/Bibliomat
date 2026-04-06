@@ -681,6 +681,176 @@ if st.session_state['df_geral'] is not None:
                 else:
                     st.warning("Não foram encontradas palavras-chave válidas.")
 
+        # =========================================================
+        # --- DISTRIBUIÇÃO ESTATÍSTICA (BOXPLOT) ---
+        # =========================================================
+        st.divider()
+        st.markdown("##### 📊 Distribuição Estatística Comparativa (Boxplot)")
+        st.caption("Analise a consistência e descubra *outliers* selecionando até 5 grupos. O Boxplot revela a mediana e a dispersão dos dados, enquanto os pontos mostram cada entidade individualmente.")
+
+        col_box_opt, col_box_fig = st.columns([1, 3])
+
+        with col_box_opt:
+            st.write("")
+            entidade_box = st.selectbox(
+                "Comparar grupos por (Eixo X):", 
+                ["Países", "Palavras-chave", "Temas (IA)"],
+                key="sel_box_entidade"
+            )
+
+            # 1. Prepara e explode os dados baseados na escolha do usuário
+            df_box = df.copy()
+            coluna_valida = True
+            
+            if entidade_box == "Países":
+                if 'COUNTRY' in df_box.columns:
+                    df_box['Item_Box'] = df_box['COUNTRY'].astype(str).str.split(';')
+                else: coluna_valida = False
+            elif entidade_box == "Palavras-chave":
+                col_kw = next((c for c in ['KEYWORDS', 'KW', 'DE'] if c in df_box.columns), None)
+                if col_kw:
+                    df_box['Item_Box'] = df_box[col_kw].astype(str).str.split(';')
+                else: coluna_valida = False
+            elif entidade_box == "Temas (IA)":
+                if 'TEMA_GEMINI' in df_box.columns:
+                    df_box['Item_Box'] = df_box['TEMA_GEMINI'].apply(lambda x: [x] if pd.notna(x) else [])
+                else: coluna_valida = False
+
+            if coluna_valida:
+                # Explode as listas para separar os múltiplos países/palavras de um mesmo artigo
+                df_box = df_box.explode('Item_Box')
+                df_box['Item_Box'] = df_box['Item_Box'].astype(str).str.strip().str.title()
+                df_box = df_box[(df_box['Item_Box'] != '') & (df_box['Item_Box'] != 'Nan') & (df_box['Item_Box'] != 'None')]
+
+                # Pega os top 300 mais frequentes para manter a interface rápida
+                top_itens_box = df_box['Item_Box'].value_counts().head(300).index.tolist()
+                
+                itens_selecionados = st.multiselect(
+                    "Selecione até 5 itens:", 
+                    options=top_itens_box,
+                    max_selections=5,
+                    key="sel_box_itens",
+                    help="A lista exibe os 300 itens mais frequentes da base para comparação."
+                )
+
+                # ATUALIZAÇÃO: Selectbox com 6 métricas específicas
+                metrica_box = st.selectbox(
+                    "Métrica (Eixo Y):", 
+                    [
+                        "Quantidade de documentos por autor",
+                        "Quantidade de documentos por ano",
+                        "Quantidade de citações por documento",
+                        "Quantidade de citações por autor",
+                        "Quantidade de citações por ano"
+                    ],
+                    key="sel_box_metrica"
+                )
+                
+                # ATUALIZAÇÃO: Opção de escala Logarítmica
+                escala_log = st.checkbox("Escala Logarítmica (Eixo Y)", value=False, key="chk_box_log", help="Ideal para lidar com outliers extremos de citações.")
+            else:
+                st.warning(f"A coluna de {entidade_box} não está disponível nesta base de dados. Faça o mapeamento temático com IA")
+                itens_selecionados = []
+
+        with col_box_fig:
+            # 2. Lógica de Renderização do Gráfico
+            if not coluna_valida:
+                st.info("Aguardando dados válidos...")
+            elif not itens_selecionados:
+                st.info("👈 Selecione de 1 a 5 itens no painel ao lado para gerar o gráfico de distribuição.")
+            else:
+                with st.spinner("Agrupando dados e calculando dispersão estatística..."):
+                    df_plot = df_box[df_box['Item_Box'].isin(itens_selecionados)].copy()
+                    
+                    # Garante que citações seja numérico caso exista
+                    if 'TOTAL CITATIONS' in df_plot.columns:
+                        df_plot['TOTAL CITATIONS'] = pd.to_numeric(df_plot['TOTAL CITATIONS'], errors='coerce').fillna(0)
+                    else:
+                        df_plot['TOTAL CITATIONS'] = 0
+                        
+                    df_agg = None
+                    y_col = None
+                    hover_data = None
+                    y_label = ""
+                    
+                    # LÓGICA DE AGRUPAMENTO (6 MÉTRICAS)
+                        
+                    if metrica_box == "Quantidade de documentos por autor":
+                        if 'AUTHORS' in df_plot.columns:
+                            df_exp = df_plot.assign(AUTHOR=df_plot['AUTHORS'].astype(str).str.split(';')).explode('AUTHOR')
+                            df_exp['AUTHOR'] = df_exp['AUTHOR'].str.strip()
+                            df_exp = df_exp[df_exp['AUTHOR'] != '']
+                            df_agg = df_exp.groupby(['Item_Box', 'AUTHOR']).size().reset_index(name='Qtd')
+                            y_col = 'Qtd'
+                            hover_data = ['AUTHOR']
+                            y_label = "Qtd. Documentos"
+                        else:
+                            st.warning("Coluna de Autores não encontrada.")
+                            
+                    elif metrica_box == "Quantidade de documentos por ano":
+                        if 'YEAR CLEAN' in df_plot.columns:
+                            df_plot['YEAR CLEAN'] = pd.to_numeric(df_plot['YEAR CLEAN'], errors='coerce')
+                            df_plot = df_plot.dropna(subset=['YEAR CLEAN'])
+                            df_agg = df_plot.groupby(['Item_Box', 'YEAR CLEAN']).size().reset_index(name='Qtd')
+                            y_col = 'Qtd'
+                            hover_data = ['YEAR CLEAN']
+                            y_label = "Qtd. Documentos"
+                        else:
+                            st.warning("Coluna de Ano não encontrada.")
+                            
+                    elif metrica_box == "Quantidade de citações por documento":
+                        df_agg = df_plot.copy()
+                        y_col = 'TOTAL CITATIONS'
+                        hover_data = ['TITLE'] if 'TITLE' in df_agg.columns else None
+                        y_label = "Citações por Documento"
+                        
+                    elif metrica_box == "Quantidade de citações por autor":
+                        if 'AUTHORS' in df_plot.columns:
+                            df_exp = df_plot.assign(AUTHOR=df_plot['AUTHORS'].astype(str).str.split(';')).explode('AUTHOR')
+                            df_exp['AUTHOR'] = df_exp['AUTHOR'].str.strip()
+                            df_exp = df_exp[df_exp['AUTHOR'] != '']
+                            df_agg = df_exp.groupby(['Item_Box', 'AUTHOR'])['TOTAL CITATIONS'].sum().reset_index(name='Citações')
+                            y_col = 'Citações'
+                            hover_data = ['AUTHOR']
+                            y_label = "Citações Acumuladas"
+                        else:
+                            st.warning("Coluna de Autores não encontrada.")
+                            
+                    elif metrica_box == "Quantidade de citações por ano":
+                        if 'YEAR CLEAN' in df_plot.columns:
+                            df_plot['YEAR CLEAN'] = pd.to_numeric(df_plot['YEAR CLEAN'], errors='coerce')
+                            df_plot = df_plot.dropna(subset=['YEAR CLEAN'])
+                            df_agg = df_plot.groupby(['Item_Box', 'YEAR CLEAN'])['TOTAL CITATIONS'].sum().reset_index(name='Citações')
+                            y_col = 'Citações'
+                            hover_data = ['YEAR CLEAN']
+                            y_label = "Citações Acumuladas"
+                        else:
+                            st.warning("Coluna de Ano não encontrada.")
+
+                    # 3. Desenho do Gráfico Plotly
+                    if df_agg is not None and not df_agg.empty and y_col:
+                        fig_box = px.box(
+                            df_agg, 
+                            x='Item_Box', 
+                            y=y_col, 
+                            color='Item_Box',
+                            points='all', # Pontos visíveis mostrando cada ocorrência da distribuição
+                            hover_data=hover_data,
+                            labels={'Item_Box': entidade_box, y_col: y_label},
+                            color_discrete_sequence=px.colors.qualitative.Pastel,
+                            log_y=escala_log # Aplica a escala algorítmica caso ativada
+                        )
+                        
+                        fig_box.update_layout(
+                            showlegend=False,
+                            paper_bgcolor='rgba(0,0,0,0)',
+                            plot_bgcolor='rgba(0,0,0,0)',
+                            height=450,
+                            margin=dict(l=20, r=20, t=20, b=20),
+                            xaxis=dict(title=None)
+                        )
+                        st.plotly_chart(fig_box, width='stretch', theme="streamlit")
+
         # --- BLOCO: COLABORAÇÃO ENTRE PAÍSES ---
         st.divider()
         st.markdown("##### 🌍 Redes de Colaboração Internacional")
