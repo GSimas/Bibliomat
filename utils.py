@@ -430,7 +430,6 @@ def _join_sorted(values, sep=", "):
     return sep.join(sorted(set(cleaned)))
 
 
-@st.cache_data(show_spinner=False)
 def padronizar_base_bibliometrica(df):
     if df is None:
         return None
