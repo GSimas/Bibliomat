@@ -71,7 +71,125 @@ st.session_state.setdefault('df_geral', None)
 st.session_state.setdefault('df_original', None)
 st.session_state.setdefault('df_duplicados', pd.DataFrame())
 st.session_state.setdefault('tabela_sna_completa', None)
+st.session_state.setdefault('mostrar_descritivo', True)
 
+
+# ==========================================================
+# --- DESCRITIVO INICIAL DO SIMETRICS ---
+# ==========================================================
+if st.session_state.get('mostrar_descritivo', True) and st.session_state['df_geral'] is None:
+    with st.container():
+        st.markdown("""
+        ### 📚 O que é o Simetrics?
+        
+        **Simetrics** é uma plataforma avançada de análise bibliométrica e cientométrica que transforma dados brutos de pesquisa acadêmica em inteligência estratégica. Desenvolvida para pesquisadores, gestores de ciência e tomadores de decisão, o Simetrics oferece uma visão 360° do ecossistema científico.
+        
+        ---
+        
+        #### 🎯 Funcionalidades Principais
+        
+        **1. 📊 Análise Bibliométrica Completa**
+        - Visualize a dinâmica de produção científica ao longo do tempo
+        - Identifique tendências, ciclos e períodos de crescimento
+        - Compare métricas de impacto por base de dados, país, autor e venue
+        - Análise estatística avançada com distribuições (boxplots) e outliers
+        
+        **2. 🤖 Inteligência Artificial & Categorização**
+        - Mapeamento automático de escolas temáticas via Machine Learning (Gemini AI)
+        - Agrupamento semântico de documentos sem classificação manual pré-existente
+        - Identificação do Quociente Locacional (QL) para descobrir especialização vocacional
+        - Análise da genética das ideias: mortalidade, fecundidade e longevidade do conhecimento
+        
+        **3. 🕸️ Redes de Conhecimento (SNA)**
+        - **Rede de Coautoria:** Visualize colaborações entre pesquisadores
+        - **Rede de Cocitação:** Descubra documentos seminais que fundamentam a pesquisa
+        - **Coocorrência de Palavras-chave:** Mapeie a estrutura conceitual do campo
+        - **Análise Heterogênea:** Integre autores, documentos, países e venues em um único grafo
+        - Métricas avançadas: Centralidade, Betweenness, Closeness, Lei de Potência
+        
+        **4. 🔍 Motor de Busca Inteligente**
+        - Investigue qualquer entidade: documentos, autores, países, venues ou temas
+        - Visualize histórico temporal e evolução de interesse
+        - Descubra especialização temática (QL) e lideranças por tema
+        - Encontre documentos semelhantes via similaridade de conteúdo
+        - Lexicometria customizável: nuvem de palavras com múltiplas fontes e estilos
+        
+        **5. 📈 Ecologia Profunda & Topologia**
+        - Análise da Lei de Potência (comumente observada em redes científicas)
+        - Correlação de Spearman: identifique inovação (Brokers) vs hierarquias
+        - Assortatividade: redes expansivas vs fechadas (endógenas)
+        - Diâmetro, Densidade e Clusters: entenda a saúde global da rede
+        
+        **6. 🗺️ Mapeamentos Conceituais**
+        - **PCA 2D e 3D:** Redução dimensional interativa com clustering
+        - **Mapa Temático (4 Quadrantes):** Classificação por Densidade vs Centralidade
+        - **Sankey Temporal:** Acompanhe a evolução de termos em 3 períodos
+        - **Historiograph:** Linha do tempo de citações diretas
+        - **Colaboração Internacional:** Redes circulares e mapas-múndi interativos
+        
+        **7. 🎛️ Ferramentas de Limpeza & Qualidade**
+        - Deduplicação por DOI exato e similaridade de título
+        - Análise de completude de metadados (semáforo: Excelente/Bom/Aceitável/Crítico)
+        - Relatório permanente de documentos excluídos (para metodologia PRISMA)
+        - Controle granular de thresholds
+        
+        **8. 🤖 Assistente Científico (Chatbot)**
+        - Converse com sua base de dados em linguagem natural
+        - Peça recomendações de leitura sobre temas específicos
+        - Identifique especialistas e principais pesquisadores
+        - Descubra os melhores venues para submeter seu artigo
+        - Baseado em Google Gemini com contexto sincronizado
+        
+        **9. 📥 Importação Flexível**
+        - Suporte para múltiplas bases: **Scopus**, **Web of Science**, **SciELO**, **PubMed**, **Cochrane**
+        - Formatos aceitos: RIS, CSV, Excel, TXT/NBIB
+        - Integração automática de múltiplos arquivos
+        - Modo Demonstração: explore com dados de exemplo pré-carregados
+        
+        ---
+        
+        #### 💡 Casos de Uso
+        
+        ✅ **Pesquisadores:** Realize revisões sistemáticas e mapeamentos de literatura com rigor cientométrico
+        
+        ✅ **Gestores de CT&I:** Monitore a ciência produzida, identifique clusters de pesquisa e aloque recursos
+        
+        ✅ **Editores & Revisores:** Avalie qualidade, impacto e relevância de manuscritos submetidos
+        
+        ✅ **Policy Makers:** Tome decisões baseadas em dados sobre investimento em P&D
+        
+        ✅ **Estudantes de Pós-Graduação:** Estruture sua revisão bibliográfica e descubra gaps de pesquisa
+        
+        ---
+        
+        #### 🚀 Como Começar
+        
+        1️⃣ **Importe seus dados** pelo painel à esquerda (suporta RIS, CSV, Excel, TXT/NBIB)
+        
+        2️⃣ **Escolha a base de dados** para cada arquivo (Scopus, WoS, SciELO, PubMed, Cochrane)
+        
+        3️⃣ **Clique em \"Processar e Integrar\"** para consolidar e padronizar
+        
+        4️⃣ **Explore as 4 abas principais:**
+           - 📊 **Informações Principais:** Métricas globais, rankings e distribuições
+           - 🕸️ **Redes e Grafos:** SNA, coautoria, cocitação e análise heterogênea
+           - 🔍 **Motor de Busca:** Dossiês, perfis e evolução de entidades
+           - 🤖 **Assistente Científico:** Chat com sua base de dados
+        
+        ---
+        
+        #### ⚙️ Notas Técnicas
+        
+        - **Limite:** Até 10.000 documentos por processamento
+        - **Latência:** Análises de redes grandes podem levar minutos (visualizações são processadas sob demanda)
+        - **Qualidade de dados:** Metadados incompletos podem afetar precisão de co-ocorrência e clustering
+        - **IA Responsável:** Sempre verificar interpretações do Gemini com os dados brutos
+        
+        ---
+        
+        ✨ **Pronto para explorar?** Suba um arquivo e descubra os padrões escondidos em sua pesquisa!
+        """)
+    st.divider()
 
 with st.sidebar:
     st.image("simetrics - logo.png", width='stretch')
@@ -126,6 +244,7 @@ with st.sidebar:
             )
             
         if st.button("Processar e Integrar", type="primary"):
+            st.session_state['mostrar_descritivo'] = False
             
             # 1. Inicializa a barra de progresso
             pbar_load = st.progress(0, text="Iniciando integração de dados...")
@@ -180,6 +299,7 @@ with st.sidebar:
     st.caption("Não tem arquivos agora? Explore o Simetrics com dados de exemplo.")
     
     if st.button("🚀 Carregar Arquivos de Exemplo", help="Carrega automaticamente bases pré-configuradas (Scopus, WoS e SciELO) da pasta do projeto."):
+        st.session_state['mostrar_descritivo'] = False
        
         # Lista dos arquivos que devem estar na pasta raiz
         arquivos_demo = ["scopus.ris", "wos.ris", "scielo.ris"]
