@@ -19,6 +19,87 @@ from wordcloud import STOPWORDS
 
 CURRENT_YEAR = date.today().year
 
+
+def calcular_indices_cientometricos(df, coluna_entidade, ano_base=CURRENT_YEAR):
+    """
+    Calcula os Índices h, g, i10 e m para qualquer entidade (Autores, Países, Venues, Keywords).
+    """
+    df_calc = df[[coluna_entidade, 'TOTAL CITATIONS', 'YEAR CLEAN']].copy()
+    
+    # 1. Limpeza e conversão de dados
+    df_calc['TOTAL CITATIONS'] = pd.to_numeric(df_calc['TOTAL CITATIONS'], errors='coerce').fillna(0).astype(int)
+    df_calc['YEAR CLEAN'] = pd.to_numeric(df_calc['YEAR CLEAN'], errors='coerce')
+    
+    # 2. Separação de múltiplos valores (Ex: Autor A; Autor B)
+    # Se for Venue, não precisa separar por ';', mas Autores, Países e Keywords precisam.
+    if coluna_entidade in ['AUTHORS', 'COUNTRY', 'KEYWORDS', 'KW', 'DE']:
+        df_calc[coluna_entidade] = df_calc[coluna_entidade].astype(str).str.split(';')
+        df_calc = df_calc.explode(coluna_entidade)
+        
+    df_calc[coluna_entidade] = df_calc[coluna_entidade].astype(str).str.strip().str.title()
+    df_calc = df_calc[(df_calc[coluna_entidade] != '') & (df_calc[coluna_entidade] != 'Nan') & (df_calc[coluna_entidade] != 'None')]
+
+    # 3. Lógica Matemática por Entidade
+    resultados = []
+    
+    # Agrupa por entidade para calcular tudo de uma vez
+    for entidade, grupo in df_calc.groupby(coluna_entidade):
+        citacoes = grupo['TOTAL CITATIONS'].sort_values(ascending=False).tolist()
+        anos = grupo['YEAR CLEAN'].dropna().tolist()
+        
+        total_docs = len(citacoes)
+        total_citacoes = sum(citacoes)
+        
+        # Se não houver citações, os índices são 0
+        if total_citacoes == 0:
+            resultados.append({coluna_entidade: entidade, 'Docs': total_docs, 'Citações': 0, 'Índice h': 0, 'Índice g': 0, 'Índice i10': 0, 'Índice m': 0.0})
+            continue
+
+        # Cálculo do Índice h
+        h_index = 0
+        for i, c in enumerate(citacoes):
+            if c >= i + 1:
+                h_index = i + 1
+            else:
+                break
+                
+        # Cálculo do Índice g
+        # g é o maior número onde a soma das g maiores citações é >= g²
+        g_index = 0
+        soma_acumulada = 0
+        for i, c in enumerate(citacoes):
+            soma_acumulada += c
+            if soma_acumulada >= (i + 1) ** 2:
+                g_index = i + 1
+            else:
+                break
+                
+        # Cálculo do Índice i10
+        i10_index = sum(1 for c in citacoes if c >= 10)
+        
+        # Cálculo do Índice m (h-index / anos de atuação)
+        m_index = 0.0
+        if anos:
+            primeiro_ano = min(anos)
+            # Soma 1 para evitar divisão por zero se a primeira publicação for no mesmo ano da base
+            anos_atuacao = (ano_base - primeiro_ano) + 1 
+            if anos_atuacao > 0:
+                m_index = round(h_index / anos_atuacao, 3)
+
+        resultados.append({
+            coluna_entidade: entidade,
+            'Docs': total_docs,
+            'Citações': total_citacoes,
+            'Índice h': h_index,
+            'Índice g': g_index,
+            'Índice i10': i10_index,
+            'Índice m': m_index
+        })
+
+    # Retorna um DataFrame pronto para a interface
+    return pd.DataFrame(resultados).sort_values(by=['Índice h', 'Índice g'], ascending=[False, False])
+
+
 def processar_cochrane(file, nome_arquivo):
     """Processa arquivos CSV ou RIS exportados da Cochrane Library."""
     import pandas as pd
@@ -740,8 +821,6 @@ def _get_top_doc(group):
 
 # --- MOTORES DE GERAÇÃO DE TABELAS ---
 
-# --- MOTORES DE GERAÇÃO DE TABELAS (ATUALIZADOS COM QL) ---
-
 @st.cache_data(show_spinner=False)
 def gerar_tabela_autores(df):
     if 'AUTHORS' not in df.columns: return pd.DataFrame()
@@ -760,7 +839,33 @@ def gerar_tabela_autores(df):
 
     res = []
     for autor, group in df_exp.groupby('AUTHOR'):
-        cits = group['TOTAL CITATIONS'].fillna(0)
+        cits_raw = group['TOTAL CITATIONS'].fillna(0)
+        cits_sorted = cits_raw.astype(int).sort_values(ascending=False).tolist()
+        
+        # --- CÁLCULO DOS ÍNDICES CIENTOMÉTRICOS ---
+        h_index = 0
+        for i, c in enumerate(cits_sorted):
+            if c >= i + 1: h_index = i + 1
+            else: break
+
+        g_index = 0
+        soma_acumulada = 0
+        for i, c in enumerate(cits_sorted):
+            soma_acumulada += c
+            if soma_acumulada >= (i + 1) ** 2: g_index = i + 1
+            else: break
+
+        i10_index = sum(1 for c in cits_sorted if c >= 10)
+
+        m_index = 0.0
+        if 'YEAR CLEAN' in group.columns:
+            anos_validos = pd.to_numeric(group['YEAR CLEAN'], errors='coerce').dropna().astype(int).tolist()
+            if anos_validos:
+                primeiro_ano = min(anos_validos)
+                anos_atuacao = (2026 - primeiro_ano) + 1
+                if anos_atuacao > 0:
+                    m_index = round(h_index / anos_atuacao, 3)
+        # ------------------------------------------
         
         coautores = set()
         for auth_list in group['AUTHORS'].dropna():
@@ -771,7 +876,7 @@ def gerar_tabela_autores(df):
             for c_list in group['COUNTRY'].dropna():
                 paises.update([c.strip().title() for c in str(c_list).split(';') if c.strip()])
 
-        # Cálculo do QL para este autor
+        # Cálculo do QL
         tema_principal = "Não Categorizado"
         if has_tema and 'TEMA_GEMINI' in group.columns:
             q_k = len(group)
@@ -794,14 +899,19 @@ def gerar_tabela_autores(df):
             'Especialização Principal (Maior QL)': tema_principal,
             'Documentos': " | ".join(group['TITLE'].dropna().astype(str)),
             'Qtd. de Documentos': len(group),
-            'Qtd. de Citações': cits.sum(),
-            'Média de Citações': round(cits.mean(), 2),
-            'Mediana de Citações': round(cits.median(), 2),
-            'Desvio Padrão de Citações': round(cits.std(), 2) if len(group) > 1 else 0.0,
+            'Qtd. de Citações': cits_raw.sum(),
+            'Índice h': h_index,
+            'Índice g': g_index,
+            'Índice i10': i10_index,
+            'Índice m': m_index,
+            'Média de Citações': round(cits_raw.mean(), 2),
+            'Mediana de Citações': round(cits_raw.median(), 2),
+            'Desvio Padrão de Citações': round(cits_raw.std(), 2) if len(group) > 1 else 0.0,
             'Anos, Documentos e Citações': _format_timeline(group),
             'Coautores': ", ".join(coautores)
         })
-    return pd.DataFrame(res).sort_values(by='Qtd. de Citações', ascending=False).reset_index(drop=True)
+    return pd.DataFrame(res).sort_values(by=['Índice h', 'Qtd. de Citações'], ascending=[False, False]).reset_index(drop=True)
+
 
 @st.cache_data(show_spinner=False)
 def gerar_tabela_paises(df):
@@ -820,7 +930,33 @@ def gerar_tabela_paises(df):
 
     res = []
     for pais, group in df_exp.groupby('PAIS'):
-        cits = group['TOTAL CITATIONS'].fillna(0)
+        cits_raw = group['TOTAL CITATIONS'].fillna(0)
+        cits_sorted = cits_raw.astype(int).sort_values(ascending=False).tolist()
+        
+        # --- CÁLCULO DOS ÍNDICES CIENTOMÉTRICOS ---
+        h_index = 0
+        for i, c in enumerate(cits_sorted):
+            if c >= i + 1: h_index = i + 1
+            else: break
+
+        g_index = 0
+        soma_acumulada = 0
+        for i, c in enumerate(cits_sorted):
+            soma_acumulada += c
+            if soma_acumulada >= (i + 1) ** 2: g_index = i + 1
+            else: break
+
+        i10_index = sum(1 for c in cits_sorted if c >= 10)
+
+        m_index = 0.0
+        if 'YEAR CLEAN' in group.columns:
+            anos_validos = pd.to_numeric(group['YEAR CLEAN'], errors='coerce').dropna().astype(int).tolist()
+            if anos_validos:
+                primeiro_ano = min(anos_validos)
+                anos_atuacao = (2026 - primeiro_ano) + 1
+                if anos_atuacao > 0:
+                    m_index = round(h_index / anos_atuacao, 3)
+        # ------------------------------------------
         
         autores = set()
         for auth_list in group['AUTHORS'].dropna():
@@ -847,14 +983,19 @@ def gerar_tabela_paises(df):
             'Especialização Principal (Maior QL)': tema_principal,
             'Autores': ", ".join(autores),
             'Qtd. de Autores': len(autores),
-            'Qtd. de Citações': cits.sum(),
-            'Média de Citações': round(cits.mean(), 2),
-            'Mediana de Citações': round(cits.median(), 2),
-            'Desvio Padrão de Citações': round(cits.std(), 2) if len(group) > 1 else 0.0,
+            'Qtd. de Citações': cits_raw.sum(),
+            'Índice h': h_index,
+            'Índice g': g_index,
+            'Índice i10': i10_index,
+            'Índice m': m_index,
+            'Média de Citações': round(cits_raw.mean(), 2),
+            'Mediana de Citações': round(cits_raw.median(), 2),
+            'Desvio Padrão de Citações': round(cits_raw.std(), 2) if len(group) > 1 else 0.0,
             'Anos, Documentos e Citações': _format_timeline(group),
             'Documento com Mais Citações': _get_top_doc(group)
         })
-    return pd.DataFrame(res).sort_values(by='Qtd. de Citações', ascending=False).reset_index(drop=True)
+    return pd.DataFrame(res).sort_values(by=['Índice h', 'Qtd. de Citações'], ascending=[False, False]).reset_index(drop=True)
+
 
 @st.cache_data(show_spinner=False)
 def gerar_tabela_venues(df):
@@ -870,7 +1011,33 @@ def gerar_tabela_venues(df):
 
     res = []
     for venue, group in df_ven.groupby(col_venue):
-        cits = group['TOTAL CITATIONS'].fillna(0)
+        cits_raw = group['TOTAL CITATIONS'].fillna(0)
+        cits_sorted = cits_raw.astype(int).sort_values(ascending=False).tolist()
+        
+        # --- CÁLCULO DOS ÍNDICES CIENTOMÉTRICOS ---
+        h_index = 0
+        for i, c in enumerate(cits_sorted):
+            if c >= i + 1: h_index = i + 1
+            else: break
+
+        g_index = 0
+        soma_acumulada = 0
+        for i, c in enumerate(cits_sorted):
+            soma_acumulada += c
+            if soma_acumulada >= (i + 1) ** 2: g_index = i + 1
+            else: break
+
+        i10_index = sum(1 for c in cits_sorted if c >= 10)
+
+        m_index = 0.0
+        if 'YEAR CLEAN' in group.columns:
+            anos_validos = pd.to_numeric(group['YEAR CLEAN'], errors='coerce').dropna().astype(int).tolist()
+            if anos_validos:
+                primeiro_ano = min(anos_validos)
+                anos_atuacao = (2026 - primeiro_ano) + 1
+                if anos_atuacao > 0:
+                    m_index = round(h_index / anos_atuacao, 3)
+        # ------------------------------------------
         
         autores = set()
         for auth_list in group['AUTHORS'].dropna():
@@ -897,14 +1064,81 @@ def gerar_tabela_venues(df):
             'Especialização Principal (Maior QL)': tema_principal,
             'Autores': ", ".join(autores),
             'Qtd. de Autores': len(autores),
-            'Qtd. de Citações': cits.sum(),
-            'Média de Citações': round(cits.mean(), 2),
-            'Mediana de Citações': round(cits.median(), 2),
-            'Desvio Padrão de Citações': round(cits.std(), 2) if len(group) > 1 else 0.0,
+            'Qtd. de Citações': cits_raw.sum(),
+            'Índice h': h_index,
+            'Índice g': g_index,
+            'Índice i10': i10_index,
+            'Índice m': m_index,
+            'Média de Citações': round(cits_raw.mean(), 2),
+            'Mediana de Citações': round(cits_raw.median(), 2),
+            'Desvio Padrão de Citações': round(cits_raw.std(), 2) if len(group) > 1 else 0.0,
             'Anos, Documentos e Citações': _format_timeline(group),
             'Documento com Mais Citações': _get_top_doc(group)
         })
-    return pd.DataFrame(res).sort_values(by='Qtd. de Citações', ascending=False).reset_index(drop=True)
+    return pd.DataFrame(res).sort_values(by=['Índice h', 'Qtd. de Citações'], ascending=[False, False]).reset_index(drop=True)
+
+
+@st.cache_data(show_spinner=False)
+def gerar_tabela_keywords(df):
+    col_kw = _pick_column(df, ['KEYWORDS', 'KW', 'DE'])
+    if not col_kw:
+        return pd.DataFrame()
+    
+    df_exp = df.copy()
+    df_exp['KW'] = df_exp[col_kw].astype(str).str.split(';')
+    df_exp = df_exp.explode('KW')
+    df_exp['KW'] = df_exp['KW'].str.strip().str.title()
+    df_exp = df_exp[(df_exp['KW'] != '') & (df_exp['KW'] != 'Nan')]
+
+    res = []
+    for kw, group in df_exp.groupby('KW'):
+        cits_raw = group['TOTAL CITATIONS'].fillna(0)
+        cits_sorted = cits_raw.astype(int).sort_values(ascending=False).tolist()
+        
+        # --- CÁLCULO DOS ÍNDICES CIENTOMÉTRICOS ---
+        h_index = 0
+        for i, c in enumerate(cits_sorted):
+            if c >= i + 1: h_index = i + 1
+            else: break
+
+        g_index = 0
+        soma_acumulada = 0
+        for i, c in enumerate(cits_sorted):
+            soma_acumulada += c
+            if soma_acumulada >= (i + 1) ** 2: g_index = i + 1
+            else: break
+
+        i10_index = sum(1 for c in cits_sorted if c >= 10)
+
+        m_index = 0.0
+        if 'YEAR CLEAN' in group.columns:
+            anos_validos = pd.to_numeric(group['YEAR CLEAN'], errors='coerce').dropna().astype(int).tolist()
+            if anos_validos:
+                primeiro_ano = min(anos_validos)
+                anos_atuacao = (2026 - primeiro_ano) + 1
+                if anos_atuacao > 0:
+                    m_index = round(h_index / anos_atuacao, 3)
+        # ------------------------------------------
+        
+        autores = set()
+        for auth_list in group['AUTHORS'].dropna():
+            autores.update([a.strip().title() for a in str(auth_list).split(';') if a.strip()])
+
+        res.append({
+            'Palavra-chave': kw,
+            'Autores que usaram': ", ".join(autores),
+            'Qtd. de Autores': len(autores),
+            'Qtd. de Citações': cits_raw.sum(),
+            'Índice h': h_index,
+            'Índice g': g_index,
+            'Índice i10': i10_index,
+            'Índice m': m_index,
+            'Média de Citações': round(cits_raw.mean(), 2),
+            'Mediana de Citações': round(cits_raw.median(), 2),
+            'Desvio Padrão de Citações': round(cits_raw.std(), 2) if len(group) > 1 else 0.0,
+            'Documento com Mais Citações': _get_top_doc(group)
+        })
+    return pd.DataFrame(res).sort_values(by=['Índice h', 'Qtd. de Citações'], ascending=[False, False]).reset_index(drop=True)
 
 @st.cache_data(show_spinner=False)
 def obter_top_ql_por_tema(df):
@@ -954,38 +1188,6 @@ def obter_top_ql_por_tema(df):
     top_ven = _calc_top(next((c for c in ['SECONDARY TITLE', 'SO', 'JO'] if c in df.columns), 'SECONDARY TITLE'))
     
     return top_aut, top_pais, top_ven
-
-@st.cache_data(show_spinner=False)
-def gerar_tabela_keywords(df):
-    col_kw = _pick_column(df, ['KEYWORDS', 'KW', 'DE'])
-    if not col_kw:
-        return pd.DataFrame()
-    
-    df_exp = df.copy()
-    df_exp['KW'] = df_exp[col_kw].astype(str).str.split(';')
-    df_exp = df_exp.explode('KW')
-    df_exp['KW'] = df_exp['KW'].str.strip().str.title()
-    df_exp = df_exp[(df_exp['KW'] != '') & (df_exp['KW'] != 'Nan')]
-
-    res = []
-    for kw, group in df_exp.groupby('KW'):
-        cits = group['TOTAL CITATIONS'].fillna(0)
-        
-        autores = set()
-        for auth_list in group['AUTHORS'].dropna():
-            autores.update([a.strip().title() for a in str(auth_list).split(';') if a.strip()])
-
-        res.append({
-            'Palavra-chave': kw,
-            'Autores que usaram': ", ".join(autores),
-            'Qtd. de Autores': len(autores),
-            'Qtd. de Citações': cits.sum(),
-            'Média de Citações': round(cits.mean(), 2),
-            'Mediana de Citações': round(cits.median(), 2),
-            'Desvio Padrão de Citações': round(cits.std(), 2) if len(group) > 1 else 0.0,
-            'Documento com Mais Citações': _get_top_doc(group)
-        })
-    return pd.DataFrame(res).sort_values(by='Qtd. de Citações', ascending=False).reset_index(drop=True)
 
 def categorizar_temas_por_cluster(df, api_key, max_clusters=10):
     """Clusteriza documentos com TF-IDF + K-Means (otimizado por Silhouette) e nomeia via Gemini."""
@@ -1468,54 +1670,59 @@ def plot_map_collaboration(df, top_n=30):
     
     return fig
 
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+
 @st.cache_data(show_spinner=False)
-def plot_top_keywords_metric(df, metric_name, top_n=20):
-    """Gera um gráfico de barras para as Top Keywords com legenda gradiente."""
-    import pandas as pd
-    import plotly.express as px
-
-    col_kw = 'KEYWORDS'
-    if col_kw not in df.columns or df[col_kw].dropna().empty:
-        return None
-
-    # Preparação e explosão dos dados
-    df_kw = df[[col_kw, 'TOTAL CITATIONS']].dropna(subset=[col_kw]).copy()
-    df_kw[col_kw] = df_kw[col_kw].str.split(';')
-    df_kw = df_kw.explode(col_kw)
-    df_kw[col_kw] = df_kw[col_kw].str.strip().str.title()
-    df_kw = df_kw[df_kw[col_kw] != '']
-
-    # Agrupamento
-    res = df_kw.groupby(col_kw)['TOTAL CITATIONS'].agg(['count', 'sum', 'mean']).reset_index()
-    res.columns = [col_kw, 'Qtd. de Documentos', 'Total de Citações', 'Média de Citações']
-    res = res.sort_values(by=metric_name, ascending=False).head(top_n)
-
-    # Construção do Gráfico
-    fig = px.bar(
-        res, 
-        x=metric_name, 
-        y=col_kw, 
-        orientation='h',
-        labels={col_kw: 'Palavra-chave', metric_name: metric_name},
-        color=metric_name,
-        color_continuous_scale='Viridis'
-    )
-
-    fig.update_layout(
-        yaxis={'categoryorder': 'total ascending'},
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        margin=dict(l=20, r=20, t=40, b=20),
-        height=600,
-        coloraxis_showscale=True,
-        coloraxis_colorbar=dict(
-            title=dict(text=metric_name, font=dict(size=12)),
-            thicknessmode="pixels", thickness=15,
-            lenmode="fraction", len=0.8,
-            yanchor="middle", y=0.5
-        )
-    )
+def plot_top_keywords_metric(df, metrica, top_n=20):
+    col_kw = next((c for c in ['KEYWORDS', 'KW', 'DE'] if c in df.columns), None)
+    if not col_kw: return None
     
+    df_exp = df[[col_kw, 'TOTAL CITATIONS', 'YEAR CLEAN']].copy()
+    df_exp['TOTAL CITATIONS'] = pd.to_numeric(df_exp['TOTAL CITATIONS'], errors='coerce').fillna(0).astype(int)
+    df_exp['YEAR CLEAN'] = pd.to_numeric(df_exp['YEAR CLEAN'], errors='coerce')
+    df_exp['KW'] = df_exp[col_kw].astype(str).str.split(';')
+    df_exp = df_exp.explode('KW')
+    df_exp['KW'] = df_exp['KW'].str.strip().str.title()
+    df_exp = df_exp[(df_exp['KW'] != '') & (df_exp['KW'] != 'Nan')]
+
+    res_list = []
+    for kw, group in df_exp.groupby('KW'):
+        cits = group['TOTAL CITATIONS'].sort_values(ascending=False).tolist()
+        docs = len(cits)
+        total_cits = sum(cits)
+        
+        h_idx = sum(c >= i + 1 for i, c in enumerate(cits))
+        g_idx = 0
+        soma = 0
+        for i, c in enumerate(cits):
+            soma += c
+            if soma >= (i + 1)**2: g_idx = i + 1
+            else: break
+            
+        anos = group['YEAR CLEAN'].dropna().tolist()
+        # Calculando o tempo de atuação usando 2026 como base
+        m_idx = round(h_idx / ((2026 - min(anos)) + 1), 3) if anos else 0.0
+            
+        res_list.append({
+            'KW': kw, 
+            'Qtd. de Documentos': docs, 
+            'Total de Citações': total_cits, 
+            'Média de Citações': round(total_cits / docs, 2) if docs > 0 else 0, 
+            'Índice h': h_idx, 
+            'Índice g': g_idx, 
+            'Índice i10': sum(1 for c in cits if c >= 10), 
+            'Índice m': m_idx
+        })
+        
+    res_df = pd.DataFrame(res_list)
+    
+    # Ordena de forma segura usando a métrica que veio do menu do usuário
+    top_kw = res_df.sort_values(by=metrica, ascending=False).head(top_n)
+    
+    fig = px.bar(top_kw, x=metrica, y='KW', orientation='h', color=metrica, color_continuous_scale='Purples')
+    fig.update_layout(yaxis={'categoryorder':'total ascending'})
     return fig
 
 @st.cache_data(show_spinner=False)

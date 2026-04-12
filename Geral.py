@@ -644,49 +644,77 @@ if st.session_state['df_geral'] is not None:
 
         st.divider()
 
+        # =========================================================
+        # --- GLOSSÁRIO DE MÉTRICAS ---
+        # =========================================================
+        st.write("")
+        with st.expander("📖 Glossário de Métricas Cientométricas"):
+            st.markdown("""
+            Estas métricas avaliam não apenas a quantidade de publicações, mas a **consistência** e o **impacto** das entidades na rede de conhecimento:
+            
+            * **Quantidade de Documentos:** Volume total de produções científicas associadas à entidade.
+            * **Total de Citações:** Soma bruta de todas as citações recebidas. Pode ser distorcida por um único artigo "viral".
+            * **Média de Citações:** Total de citações dividido pelo número de documentos.
+            * **Índice h:** Uma entidade tem índice *h* se *h* dos seus artigos têm pelo menos *h* citações cada. Ex: Um autor com Índice h=5 possui pelo menos 5 artigos com 5 ou mais citações. Mede produtividade e impacto de forma equilibrada.
+            * **Índice g:** Dá mais peso aos artigos altamente citados, compensando uma limitação do Índice h. O índice é *g* se a soma das citações dos *g* artigos mais citados for maior ou igual a *g²*.
+            * **Índice i10:** Número exato de publicações que possuem 10 ou mais citações (métrica popularizada pelo Google Scholar).
+            * **Índice m:** É o Índice h dividido pelo número de anos de atuação (ano atual menos o ano da primeira publicação). Revela a "velocidade" de impacto, permitindo comparar veteranos e pesquisadores iniciantes de forma justa.
+            """)
+        st.write("")
+
         col_auth, col_docs = st.columns(2)
         
+        # --- TOP 20 AUTORES ---
         with col_auth:
             st.markdown("##### 👥 Top 20 Autores")
-            metric_author = st.radio(
+            
+            # Novo Selectbox com todas as métricas
+            metric_author = st.selectbox(
                 "Métrica para o Ranking de Autores:", 
-                ["Qtd. de Documentos", "Total de Citações", "Média de Citações por Doc."], 
-                horizontal=True, key="sel_auth_metric"
+                ["Qtd. de Documentos", "Total de Citações", "Média de Citações", "Índice h", "Índice g", "Índice i10", "Índice m"], 
+                key="sel_auth_metric"
             )
             
             if 'AUTHORS' in df.columns:
-                # Otimização Vetorizada
-                df_auth_temp = df[['AUTHORS', 'TOTAL CITATIONS']].copy()
-                df_auth_temp['TOTAL CITATIONS'] = pd.to_numeric(df_auth_temp['TOTAL CITATIONS'], errors='coerce').fillna(0)
+                df_auth_temp = df[['AUTHORS', 'TOTAL CITATIONS', 'YEAR CLEAN']].copy()
+                df_auth_temp['TOTAL CITATIONS'] = pd.to_numeric(df_auth_temp['TOTAL CITATIONS'], errors='coerce').fillna(0).astype(int)
+                df_auth_temp['YEAR CLEAN'] = pd.to_numeric(df_auth_temp['YEAR CLEAN'], errors='coerce')
                 df_auth_temp['Autor'] = df_auth_temp['AUTHORS'].astype(str).str.split(';')
                 
                 df_auth_expanded = df_auth_temp.explode('Autor')
                 df_auth_expanded['Autor'] = df_auth_expanded['Autor'].str.strip()
-                df_auth_expanded = df_auth_expanded[df_auth_expanded['Autor'] != '']
-                df_auth_expanded['Documentos'] = 1
+                df_auth_expanded = df_auth_expanded[(df_auth_expanded['Autor'] != '') & (df_auth_expanded['Autor'] != 'Nan')]
                 
-                # Agrupamento usando o nome real da coluna 'TOTAL CITATIONS'
-                res_auth = df_auth_expanded.groupby('Autor').agg({
-                    'Documentos': 'sum', 
-                    'TOTAL CITATIONS': 'sum'
-                }).reset_index()
+                res_list = []
+                for autor, group in df_auth_expanded.groupby('Autor'):
+                    cits = group['TOTAL CITATIONS'].sort_values(ascending=False).tolist()
+                    docs = len(cits)
+                    total_cits = sum(cits)
+                    
+                    h_idx = sum(c >= i + 1 for i, c in enumerate(cits))
+                    g_idx = 0
+                    soma = 0
+                    for i, c in enumerate(cits):
+                        soma += c
+                        if soma >= (i + 1)**2: g_idx = i + 1
+                        else: break
+                        
+                    anos = group['YEAR CLEAN'].dropna().tolist()
+                    m_idx = round(h_idx / ((2026 - min(anos)) + 1), 3) if anos else 0.0
+                        
+                    res_list.append({
+                        'Autor': autor, 'Qtd. de Documentos': docs, 'Total de Citações': total_cits, 
+                        'Média de Citações': round(total_cits / docs, 2) if docs > 0 else 0, 
+                        'Índice h': h_idx, 'Índice g': g_idx, 'Índice i10': sum(1 for c in cits if c >= 10), 'Índice m': m_idx
+                    })
                 
-                # Renomeia para 'Citações' apenas APÓS o cálculo
-                res_auth.rename(columns={'TOTAL CITATIONS': 'Citações'}, inplace=True)
-                res_auth['Média'] = (res_auth['Citações'] / res_auth['Documentos']).round(2)
+                res_auth = pd.DataFrame(res_list)
+                top_authors = res_auth.nlargest(20, metric_author)
                 
-                if metric_author == "Qtd. de Documentos":
-                    top_authors = res_auth.nlargest(20, 'Documentos')
-                    fig_auth = px.bar(top_authors, x='Documentos', y='Autor', orientation='h', color='Documentos', color_continuous_scale='Blues')
-                elif metric_author == "Total de Citações":
-                    top_authors = res_auth.nlargest(20, 'Citações')
-                    fig_auth = px.bar(top_authors, x='Citações', y='Autor', orientation='h', color='Citações', color_continuous_scale='Oranges')
-                else: # Média de Citações
-                    top_authors = res_auth.nlargest(20, 'Média')
-                    fig_auth = px.bar(top_authors, x='Média', y='Autor', orientation='h', color='Média', color_continuous_scale='GnBu')
-                
+                fig_auth = px.bar(top_authors, x=metric_author, y='Autor', orientation='h', color=metric_author, color_continuous_scale='Blues')
                 fig_auth.update_layout(yaxis={'categoryorder':'total ascending'})
                 st.plotly_chart(fig_auth, width='stretch')
+
 
         with col_docs:
             st.markdown("##### 📄 Top 20 Documentos Mais Citados")
@@ -712,93 +740,111 @@ if st.session_state['df_geral'] is not None:
         # --- LINHA 3 DE GRÁFICOS: TOP PAÍSES E TOP VENUES LADO A LADO ---
         col_pais, col_venue = st.columns(2)
         
+        # --- TOP 20 PAÍSES ---
         with col_pais:
             st.markdown("##### 🌍 Top 20 Países Mais Produtivos")
-            metric_country = st.radio(
+            metric_country = st.selectbox(
                 "Métrica de Países:", 
-                ["Qtd. de Documentos", "Total de Citações", "Média de Citações"], 
-                horizontal=True, key="sel_pais"
+                ["Qtd. de Documentos", "Total de Citações", "Média de Citações", "Índice h", "Índice g", "Índice i10", "Índice m"], 
+                key="sel_pais"
             )
             
             if 'COUNTRY' in df.columns:
-                # Otimização Vetorizada
-                df_country_temp = df[['COUNTRY', 'TOTAL CITATIONS']].copy()
-                df_country_temp['TOTAL CITATIONS'] = pd.to_numeric(df_country_temp['TOTAL CITATIONS'], errors='coerce').fillna(0)
+                df_country_temp = df[['COUNTRY', 'TOTAL CITATIONS', 'YEAR CLEAN']].copy()
+                df_country_temp['TOTAL CITATIONS'] = pd.to_numeric(df_country_temp['TOTAL CITATIONS'], errors='coerce').fillna(0).astype(int)
+                df_country_temp['YEAR CLEAN'] = pd.to_numeric(df_country_temp['YEAR CLEAN'], errors='coerce')
                 df_country_temp['País'] = df_country_temp['COUNTRY'].astype(str).str.split(';')
                 
                 df_country_expanded = df_country_temp.explode('País')
                 df_country_expanded['País'] = df_country_expanded['País'].str.strip()
-                df_country_expanded = df_country_expanded[df_country_expanded['País'] != '']
-                df_country_expanded['Documentos'] = 1
+                df_country_expanded = df_country_expanded[(df_country_expanded['País'] != '') & (df_country_expanded['País'] != 'Nan')]
                 
-                # Agrupamento usando o nome real da coluna 'TOTAL CITATIONS'
-                res_country = df_country_expanded.groupby('País').agg({
-                    'Documentos': 'sum', 
-                    'TOTAL CITATIONS': 'sum'
-                }).reset_index()
+                res_list = []
+                for pais, group in df_country_expanded.groupby('País'):
+                    cits = group['TOTAL CITATIONS'].sort_values(ascending=False).tolist()
+                    docs = len(cits)
+                    total_cits = sum(cits)
+                    
+                    h_idx = sum(c >= i + 1 for i, c in enumerate(cits))
+                    g_idx = 0
+                    soma = 0
+                    for i, c in enumerate(cits):
+                        soma += c
+                        if soma >= (i + 1)**2: g_idx = i + 1
+                        else: break
+                        
+                    anos = group['YEAR CLEAN'].dropna().tolist()
+                    m_idx = round(h_idx / ((2026 - min(anos)) + 1), 3) if anos else 0.0
+                        
+                    res_list.append({
+                        'País': pais, 'Qtd. de Documentos': docs, 'Total de Citações': total_cits, 
+                        'Média de Citações': round(total_cits / docs, 2) if docs > 0 else 0, 
+                        'Índice h': h_idx, 'Índice g': g_idx, 'Índice i10': sum(1 for c in cits if c >= 10), 'Índice m': m_idx
+                    })
                 
-                res_country.rename(columns={'TOTAL CITATIONS': 'Citações'}, inplace=True)
-                res_country['Média'] = (res_country['Citações'] / res_country['Documentos']).round(2)
+                res_country = pd.DataFrame(res_list)
+                top_c = res_country.nlargest(20, metric_country)
                 
-                if metric_country == "Qtd. de Documentos":
-                    top_c = res_country.nlargest(20, 'Documentos')
-                    fig_c = px.bar(top_c, x='Documentos', y='País', orientation='h', color='Documentos', color_continuous_scale='Viridis')
-                elif metric_country == "Total de Citações":
-                    top_c = res_country.nlargest(20, 'Citações')
-                    fig_c = px.bar(top_c, x='Citações', y='País', orientation='h', color='Citações', color_continuous_scale='Plasma')
-                else: 
-                    top_c = res_country.nlargest(20, 'Média')
-                    fig_c = px.bar(top_c, x='Média', y='País', orientation='h', color='Média', color_continuous_scale='YlGnBu')
-                
+                fig_c = px.bar(top_c, x=metric_country, y='País', orientation='h', color=metric_country, color_continuous_scale='Viridis')
                 fig_c.update_layout(yaxis={'categoryorder':'total ascending'})
                 st.plotly_chart(fig_c, width='stretch')
 
+        # --- TOP 20 VENUES ---
         with col_venue:
             st.markdown("##### 🏢 Top 20 Locais de Publicação (Venues)")
             
-            metric_venue = st.radio(
+            metric_venue = st.selectbox(
                 "Métrica de Locais:", 
-                ["Qtd. de Documentos", "Total de Citações", "Média de Citações"], 
-                horizontal=True, key="sel_venue"
+                ["Qtd. de Documentos", "Total de Citações", "Média de Citações", "Índice h", "Índice g", "Índice i10", "Índice m"], 
+                key="sel_venue"
             )
             
-            # Procura a coluna de Venues baseada nos padrões comuns
             col_venue_name = next((c for c in ['SECONDARY TITLE', 'SO', 'JO'] if c in df.columns), None)
             
             if col_venue_name:
-                df_with_venue = df[[col_venue_name, 'TOTAL CITATIONS']].copy()
+                df_with_venue = df[[col_venue_name, 'TOTAL CITATIONS', 'YEAR CLEAN']].copy()
                 df_with_venue['Venue'] = df_with_venue[col_venue_name].astype(str).str.strip()
-                df_with_venue['Citações'] = pd.to_numeric(df_with_venue['TOTAL CITATIONS'], errors='coerce').fillna(0)
+                df_with_venue['TOTAL CITATIONS'] = pd.to_numeric(df_with_venue['TOTAL CITATIONS'], errors='coerce').fillna(0).astype(int)
+                df_with_venue['YEAR CLEAN'] = pd.to_numeric(df_with_venue['YEAR CLEAN'], errors='coerce')
                 df_with_venue = df_with_venue[df_with_venue['Venue'] != '']
 
                 if not df_with_venue.empty:
-                    res_venue = (
-                        df_with_venue.assign(Documentos=1)
-                        .groupby('Venue', as_index=False)[['Documentos', 'Citações']]
-                        .sum()
-                    )
-                    res_venue['Média'] = (res_venue['Citações'] / res_venue['Documentos']).round(2)
+                    res_list = []
+                    for venue, group in df_with_venue.groupby('Venue'):
+                        cits = group['TOTAL CITATIONS'].sort_values(ascending=False).tolist()
+                        docs = len(cits)
+                        total_cits = sum(cits)
+                        
+                        h_idx = sum(c >= i + 1 for i, c in enumerate(cits))
+                        g_idx = 0
+                        soma = 0
+                        for i, c in enumerate(cits):
+                            soma += c
+                            if soma >= (i + 1)**2: g_idx = i + 1
+                            else: break
+                            
+                        anos = group['YEAR CLEAN'].dropna().tolist()
+                        m_idx = round(h_idx / ((2026 - min(anos)) + 1), 3) if anos else 0.0
+                            
+                        venue_curta = str(venue)[:35] + "..." if len(str(venue)) > 35 else str(venue)
+                        
+                        res_list.append({
+                            'Venue Completa': venue, 'Venue Curta': venue_curta, 'Qtd. de Documentos': docs, 'Total de Citações': total_cits, 
+                            'Média de Citações': round(total_cits / docs, 2) if docs > 0 else 0, 
+                            'Índice h': h_idx, 'Índice g': g_idx, 'Índice i10': sum(1 for c in cits if c >= 10), 'Índice m': m_idx
+                        })
                     
-                    # Corta nomes muito longos de revistas/conferências para o gráfico ficar bonito
-                    res_venue['Venue Curta'] = res_venue['Venue'].apply(lambda x: str(x)[:35] + "..." if len(str(x)) > 35 else x)
+                    res_venue = pd.DataFrame(res_list)
+                    top_v = res_venue.nlargest(20, metric_venue)
                     
-                    if metric_venue == "Qtd. de Documentos":
-                        top_v = res_venue.nlargest(20, 'Documentos')
-                        fig_v = px.bar(top_v, x='Documentos', y='Venue Curta', orientation='h', color='Documentos', color_continuous_scale='Teal')
-                    elif metric_venue == "Total de Citações":
-                        top_v = res_venue.nlargest(20, 'Citações')
-                        fig_v = px.bar(top_v, x='Citações', y='Venue Curta', orientation='h', color='Citações', color_continuous_scale='Aggrnyl')
-                    else: 
-                        top_v = res_venue.nlargest(20, 'Média')
-                        fig_v = px.bar(top_v, x='Média', y='Venue Curta', orientation='h', color='Média', color_continuous_scale='Tealgrn')
-                    
+                    fig_v = px.bar(top_v, x=metric_venue, y='Venue Curta', orientation='h', color=metric_venue, color_continuous_scale='Teal')
                     fig_v.update_layout(yaxis={'categoryorder':'total ascending'})
-                    # Adiciona tooltip completo para quando passar o mouse
-                    fig_v.update_traces(customdata=top_v['Venue'], hovertemplate='<b>%{customdata}</b><br>Valor: %{x}<extra></extra>')
+                    fig_v.update_traces(customdata=top_v['Venue Completa'], hovertemplate='<b>%{customdata}</b><br>Valor: %{x}<extra></extra>')
                     
                     st.plotly_chart(fig_v, width='stretch')
             else:
                 st.info("ℹ️ Nenhuma coluna de Local de Publicação (ex: SECONDARY TITLE, SO, JO) foi encontrada nos dados.")
+
 
        # --- BLOCO: TOP 20 PALAVRAS-CHAVE ---
         st.markdown("##### ☁️ Top 20 Palavras-chave")
@@ -806,11 +852,10 @@ if st.session_state['df_geral'] is not None:
         col_kw_opt, col_kw_fig = st.columns([1, 3])
 
         with col_kw_opt:
-            # ATUALIZAÇÃO: De selectbox para radio
-            metric_kw = st.radio(
+            metric_kw = st.selectbox(
                 "Métrica de Ranking (Keywords):",
-                ["Qtd. de Documentos", "Total de Citações", "Média de Citações"],
-                key="sel_metric_kw_radio" # Alterado a key para evitar conflitos
+                ["Qtd. de Documentos", "Total de Citações", "Média de Citações", "Índice h", "Índice g", "Índice i10", "Índice m"],
+                key="sel_metric_kw_radio" 
             )
             st.info("💡 **Dica:** O gradiente lateral ajuda a identificar visualmente a distância de impacto entre o termo principal e os demais.")
 
@@ -823,7 +868,7 @@ if st.session_state['df_geral'] is not None:
                     st.plotly_chart(fig_kw, width='stretch')
                 else:
                     st.warning("Não foram encontradas palavras-chave válidas.")
-
+       
         # =========================================================
         # --- DISTRIBUIÇÃO ESTATÍSTICA (BOXPLOT) ---
         # =========================================================
@@ -1745,6 +1790,10 @@ if st.session_state['df_geral'] is not None:
     # =========================================================
     # --- ABA DO MOTOR DE BUSCA ---
     # =========================================================
+    
+    # =========================================================
+    # --- ABA DO MOTOR DE BUSCA ---
+    # =========================================================
     with tab_search:
         st.header("🔍 Motor de Busca e Dossiê Científico")
         st.caption("Investigue as entidades do ecossistema e descubra sua influência topológica na rede.")
@@ -1755,13 +1804,21 @@ if st.session_state['df_geral'] is not None:
         col_paises = info_busca["col_paises"]
         col_venue = info_busca["col_venue"]
         col_ano = info_busca["col_ano"]
+        
         opcoes_doc = info_busca["opcoes_doc"]
         opcoes_aut = info_busca["opcoes_aut"]
         opcoes_pais = info_busca["opcoes_pais"]
         opcoes_venue = info_busca["opcoes_venue"]
+        
+        # Identifica e prepara as opções para Palavras-chave
+        col_kw = next((c for c in ['KEYWORDS', 'KW', 'DE'] if c in df.columns), None)
+        opcoes_kw = []
+        if col_kw:
+            kw_series = df[col_kw].dropna().astype(str).str.split(';').explode().str.strip().str.title()
+            opcoes_kw = sorted(list(set(kw_series[kw_series != ''])))
 
         # 2. Interface de Busca
-        opcoes_busca = ["Documento", "Autor", "País", "Local de Publicação (Venue)", "Tema"] # Adicionado "Tema"
+        opcoes_busca = ["Documento", "Autor", "País", "Local de Publicação (Venue)", "Palavra-chave", "Tema"] 
         
         tipo_busca = st.radio(
             "Procurar por Entidade:", 
@@ -1775,14 +1832,24 @@ if st.session_state['df_geral'] is not None:
         elif st.session_state['busca_tipo_biblio'] == "Autor": opcoes_lista = opcoes_aut
         elif st.session_state['busca_tipo_biblio'] == "País": opcoes_lista = opcoes_pais
         elif st.session_state['busca_tipo_biblio'] == "Local de Publicação (Venue)": opcoes_lista = opcoes_venue
-        elif st.session_state['busca_tipo_biblio'] == "Tema": opcoes_lista = info_busca["opcoes_tema"]
+        elif st.session_state['busca_tipo_biblio'] == "Tema": opcoes_lista = info_busca.get("opcoes_tema", [])
+        elif st.session_state['busca_tipo_biblio'] == "Palavra-chave": opcoes_lista = opcoes_kw
 
-        termo_selecionado = st.selectbox(
-            "Selecione ou digite para pesquisar:",
-            opcoes_lista,
-            index=opcoes_lista.index(st.session_state['busca_termo_biblio']) if st.session_state['busca_termo_biblio'] in opcoes_lista else None,
-            placeholder="Explore o ecossistema..."
-        )
+        # Verificação de Segurança para IA (Temas) e Palavras-chave
+        if tipo_busca == "Tema" and 'TEMA_GEMINI' not in df.columns:
+            st.warning("⚠️ **Nenhuma escola temática foi identificada nesta base de dados.**")
+            st.info("Vá até a aba **📊 Informações Principais** e execute o mapeamento via Inteligência Artificial.")
+            termo_selecionado = None
+        elif tipo_busca == "Palavra-chave" and not col_kw:
+            st.warning("⚠️ **Nenhuma coluna de palavras-chave foi encontrada nesta base de dados.**")
+            termo_selecionado = None
+        else:
+            termo_selecionado = st.selectbox(
+                "Selecione ou digite para pesquisar:",
+                opcoes_lista,
+                index=opcoes_lista.index(st.session_state['busca_termo_biblio']) if st.session_state['busca_termo_biblio'] in opcoes_lista else None,
+                placeholder="Explore o ecossistema..."
+            )
 
         if termo_selecionado != st.session_state['busca_termo_biblio']:
             st.session_state['busca_termo_biblio'] = termo_selecionado
@@ -1791,126 +1858,138 @@ if st.session_state['df_geral'] is not None:
         termo_ativo = st.session_state['busca_termo_biblio']
         tipo_ativo = st.session_state['busca_tipo_biblio']
 
-        # Função para calcular e exibir QL no momento da busca
-        # Função para calcular e exibir QL em formato de TABELA no momento da busca
-        def mostrar_ql_perfil(docs_subset, df_global):
-            import pandas as pd
-            if 'TEMA_GEMINI' not in df_global.columns or docs_subset.empty: return
-            
-            st.markdown("**🎯 Especialização Temática (Quociente Locacional):**")
-            
-            Q = df_global['TITLE'].nunique() if 'TITLE' in df_global.columns else len(df_global)
-            Qi_s = df_global.drop_duplicates('TITLE')['TEMA_GEMINI'].value_counts() if 'TITLE' in df_global.columns else df_global['TEMA_GEMINI'].value_counts()
-            
-            Qk = len(docs_subset)
-            Qik_s = docs_subset['TEMA_GEMINI'].value_counts()
-            
-            ql_data = []
-            for tema, q_ik in Qik_s.items():
-                q_i = Qi_s.get(tema, 0)
-                if q_i > 0 and Qk > 0:
-                    ql = (q_ik / Qk) / (q_i / Q)
-                    ql_data.append({
-                        "Tema / Escola de Pesquisa": tema, 
-                        "Docs no Tema": q_ik,
-                        "QL (Grau de Especialização)": round(ql, 2)
-                    })
-            
-            if ql_data:
-                # Cria o DataFrame e ordena do maior QL para o menor
-                df_ql = pd.DataFrame(ql_data).sort_values(by="QL (Grau de Especialização)", ascending=False)
-                
-                # Exibe a tabela formatada no estilo do Streamlit
-                st.dataframe(
-                    df_ql.style.background_gradient(subset=["QL (Grau de Especialização)"], cmap="Blues"),
-                    width='stretch', 
-                    hide_index=True
-                )
+        # --- FUNÇÃO: Obter Subset Seguro (Incluindo Keywords) ---
+        def obter_docs_subset(df_global, termo, tipo):
+            if tipo == "Palavra-chave" and col_kw:
+                def match_kw(x):
+                    if pd.isna(x): return False
+                    kws = [k.strip().title() for k in str(x).split(';')]
+                    return termo in kws
+                return df_global[df_global[col_kw].apply(match_kw)]
+            else:
+                return filtrar_por_entidade(df_global, termo, tipo)
 
-        # --- NOVA FUNÇÃO: Lideranças do Tema ---
-        def mostrar_liderancas_tema(tema_alvo, df_global):
-            import pandas as pd
-            if 'TEMA_GEMINI' not in df_global.columns: return
+        # --- FUNÇÃO: Motor de Índices Cientométricos ---
+        def calcular_metricas_perfil(docs_subset):
+            if 'TOTAL CITATIONS' not in docs_subset.columns: return 0, 0, 0, 0, 0, 0.0
+
+            cits_raw = pd.to_numeric(docs_subset['TOTAL CITATIONS'], errors='coerce').fillna(0).astype(int)
+            cits_sorted = cits_raw.sort_values(ascending=False).tolist()
             
-            # Base global de documentos (Q) e documentos no tema (Qi)
-            Q = df_global['TITLE'].nunique() if 'TITLE' in df_global.columns else len(df_global)
-            df_tema_global = df_global[df_global['TEMA_GEMINI'] == tema_alvo]
-            Qi = df_tema_global['TITLE'].nunique() if 'TITLE' in df_global.columns else len(df_tema_global)
+            total_docs = len(cits_sorted)
+            total_citacoes = sum(cits_sorted)
+            h_idx = sum(c >= i + 1 for i, c in enumerate(cits_sorted))
             
-            if Q == 0 or Qi == 0: return
-            
-            liderancas = []
-            
-            def processar_entidade(col, tipo_nome):
-                if col not in df_global.columns: return
-                
-                # Prepara os dados explodindo as células com múltiplos valores (ex: A; B; C)
-                df_exp = df_global[['TITLE', col, 'TEMA_GEMINI']].copy()
-                df_exp[col] = df_exp[col].astype(str).str.split(';')
-                df_exp = df_exp.explode(col)
-                
-                if tipo_nome == 'Local de Publicação (Venue)':
-                    df_exp[col] = df_exp[col].str.strip().str.upper()
-                else:
-                    df_exp[col] = df_exp[col].str.strip().str.title()
+            g_idx, soma = 0, 0
+            for i, c in enumerate(cits_sorted):
+                soma += c
+                if soma >= (i + 1)**2: g_idx = i + 1
+                else: break
                     
-                df_exp = df_exp[(df_exp[col] != '') & (df_exp[col] != 'Nan') & (df_exp[col].notna())]
-                df_exp = df_exp.drop_duplicates(subset=['TITLE', col]) # Garante unicidade
+            i10_idx = sum(1 for c in cits_sorted if c >= 10)
+            
+            m_idx = 0.0
+            if 'YEAR CLEAN' in docs_subset.columns:
+                anos_validos = pd.to_numeric(docs_subset['YEAR CLEAN'], errors='coerce').dropna().astype(int).tolist()
+                if anos_validos:
+                    m_idx = round(h_idx / ((2026 - min(anos_validos)) + 1), 3)
+                        
+            return total_docs, total_citacoes, h_idx, g_idx, i10_idx, m_idx
+
+        # --- FUNÇÃO: Renderizar Botões de Palavras-chave ---
+        def mostrar_botoes_keywords(docs_subset):
+            if not col_kw: return
+            kws = docs_subset[col_kw].dropna().astype(str).str.split(';').explode().str.strip().str.title()
+            kws = kws[kws != '']
+            top_kws = kws.value_counts().head(12) # Exibe as 12 principais para não poluir
+            
+            if not top_kws.empty:
+                st.write("**🔑 Principais Palavras-chave (clique para ver perfil):**")
+                for kw, count in top_kws.items():
+                    # Evita exibir a própria palavra-chave se já estiver no perfil dela
+                    if tipo_ativo == "Palavra-chave" and kw == termo_ativo: continue
+                    st.button(f"🔑 {kw} ({count})", key=f"btn_kw_{hash(kw)}_{tipo_ativo}", on_click=navegar_busca, args=("Palavra-chave", kw))
+
+        # --- FUNÇÃO: Tabela Universal de Associações (Ecossistema da Entidade) ---
+        def gerar_tabela_associacoes(docs_subset, df_global, tipo_entidade_atual):
+            st.markdown(f"**🕸️ Ecossistema Associado (Especialização e Ocorrências):**")
+            st.caption("Esta tabela revela quais outras entidades orbitam o perfil atual e qual o grau de especialização (QL) desta relação.")
+            
+            Q = df_global['TITLE'].nunique() if 'TITLE' in df_global.columns else len(df_global)
+            Qk = docs_subset['TITLE'].nunique() if 'TITLE' in docs_subset.columns else len(docs_subset)
+            
+            if Q == 0 or Qk == 0: return
+            
+            associacoes = []
+            
+            def processar_coluna(col_name, tipo_nome):
+                if col_name not in df_global.columns: return
+                if tipo_nome == tipo_entidade_atual: return # Evita cruzar a entidade com o próprio tipo
                 
-                # Qk: Produção total do item | Qik: Produção do item neste tema
-                Qk_s = df_exp[col].value_counts()
-                Qik_s = df_exp[df_exp['TEMA_GEMINI'] == tema_alvo][col].value_counts()
+                # Base Global
+                df_g = df_global[['TITLE', col_name]].copy()
+                df_g[col_name] = df_g[col_name].astype(str).str.split(';')
+                df_g = df_g.explode(col_name)
+                df_g[col_name] = df_g[col_name].str.strip().str.title() if tipo_nome != 'Local de Publicação (Venue)' else df_g[col_name].str.strip().str.upper()
+                df_g = df_g[(df_g[col_name] != '') & (df_g[col_name] != 'Nan') & (df_g[col_name].notna())]
+                df_g = df_g.drop_duplicates(subset=['TITLE', col_name])
+                Qi_s = df_g[col_name].value_counts()
+                
+                # Subset Ativo
+                df_s = docs_subset[['TITLE', col_name]].copy()
+                df_s[col_name] = df_s[col_name].astype(str).str.split(';')
+                df_s = df_s.explode(col_name)
+                df_s[col_name] = df_s[col_name].str.strip().str.title() if tipo_nome != 'Local de Publicação (Venue)' else df_s[col_name].str.strip().str.upper()
+                df_s = df_s[(df_s[col_name] != '') & (df_s[col_name] != 'Nan') & (df_s[col_name].notna())]
+                df_s = df_s.drop_duplicates(subset=['TITLE', col_name])
+                Qik_s = df_s[col_name].value_counts()
                 
                 for item, q_ik in Qik_s.items():
-                    q_k = Qk_s.get(item, 0)
-                    if q_k > 0:
-                        ql = (q_ik / q_k) / (Qi / Q)
-                        liderancas.append({
-                            "Nome do Item": item,
-                            "Tipo do Item": tipo_nome,
-                            "Quantidade de Documentos": q_ik,
-                            "Valor QL": round(ql, 2)
+                    q_i = Qi_s.get(item, 0)
+                    if q_i > 0:
+                        ql = (q_ik / Qk) / (q_i / Q)
+                        associacoes.append({
+                            "Nome da Entidade": item,
+                            "Tipo": tipo_nome,
+                            "Ocorrências": q_ik,
+                            "QL (Especialização)": round(ql, 2)
                         })
-                        
-            # Roda o processamento para as 3 categorias
-            processar_entidade(next((c for c in ['AUTHORS', 'AU'] if c in df_global.columns), 'AUTHORS'), "Autor")
-            processar_entidade('COUNTRY', "País")
-            processar_entidade(next((c for c in ['SECONDARY TITLE', 'SO', 'JO'] if c in df_global.columns), 'SECONDARY TITLE'), "Local de Publicação (Venue)")
             
-            if liderancas:
-                df_lid = pd.DataFrame(liderancas)
-                # Ordena primeiro pelo maior QL, depois pela quantidade de documentos para desempate
-                df_lid = df_lid.sort_values(by=["Valor QL", "Quantidade de Documentos"], ascending=[False, False])
-                df_lid = df_lid.head(50) # Exibe apenas o Top 50 para não poluir a interface
+            # Processa todas as colunas disponíveis para cruzar os dados
+            if col_kw: processar_coluna(col_kw, "Palavra-chave")
+            if col_venue: processar_coluna(col_venue, "Local de Publicação (Venue)")
+            if 'TEMA_GEMINI' in df_global.columns: processar_coluna('TEMA_GEMINI', "Tema")
+            if col_autores: processar_coluna(col_autores, "Autor")
+            if col_paises: processar_coluna(col_paises, "País")
+            
+            if associacoes:
+                df_assoc = pd.DataFrame(associacoes)
+                # Ordena primeiro pelo QL mais alto, depois pelas ocorrências
+                df_assoc = df_assoc.sort_values(by=["QL (Especialização)", "Ocorrências"], ascending=[False, False]).head(50)
                 
                 st.dataframe(
-                    df_lid.style.background_gradient(subset=["Valor QL"], cmap="Purples"),
+                    df_assoc.style.background_gradient(subset=["QL (Especialização)"], cmap="Purples"),
                     width='stretch',
                     hide_index=True
                 )
             else:
-                st.info("Nenhuma liderança destacada encontrada para este tema.")
+                st.info("Nenhuma associação forte o suficiente encontrada para gerar o ecossistema.")
 
         # 3. Construção do Perfil e Métricas SNA
         if termo_ativo:
+            subset_df = obter_docs_subset(df, termo_ativo, tipo_ativo)
             col_info, col_sna = st.columns([2, 1])
             
             grafo_global = obter_grafo_global_busca(df, col_titulos, col_autores, col_paises, col_venue)
             
             def calcular_sna_instantaneo(G, termo):
-                """Calcula métricas localizadas baseadas no Grafo Global pré-carregado."""
                 if termo not in G: return None
-                
                 grau_abs = G.degree(termo)
-                # Cálculo de centralidade de grau isolado (super rápido: grau / nós possíveis)
                 total_nos = len(G)
                 cent_grau = grau_abs / (total_nos - 1) if total_nos > 1 else 0
-                
-                # Extrai apenas os vizinhos diretos (radius=1) para a intermediação, economizando processamento pesado
                 ego_net = nx.ego_graph(G, termo, radius=1) 
                 betw = nx.betweenness_centrality(ego_net).get(termo, 0)
                 clos = nx.closeness_centrality(ego_net).get(termo, 0)
-                
                 return {"Grau Absoluto": grau_abs, "Centralidade Grau": cent_grau, "Betweenness": betw, "Closeness": clos}
 
             with col_sna:
@@ -1927,8 +2006,7 @@ if st.session_state['df_geral'] is not None:
                 st.info(f"**{tipo_ativo}:** {termo_ativo}")
                 
                 if tipo_ativo == "Documento":
-                    doc = filtrar_por_entidade(df, termo_ativo, "Documento").iloc[0]
-                    
+                    doc = subset_df.iloc[0]
                     ano = doc[col_ano] if col_ano and pd.notna(doc[col_ano]) else 'N/A'
                     citacoes = doc['TOTAL CITATIONS'] if 'TOTAL CITATIONS' in df.columns and pd.notna(doc['TOTAL CITATIONS']) else 0
                     doi = doc['DOI'] if 'DOI' in doc and pd.notna(doc['DOI']) else None
@@ -1947,104 +2025,44 @@ if st.session_state['df_geral'] is not None:
                         for i, a in enumerate(autores_doc):
                             st.button(f"👤 {a}", key=f"btn_nav_aut_doc_{hash(a)}_{i}", on_click=navegar_busca, args=("Autor", a))
                     
+                    mostrar_botoes_keywords(subset_df)
+                    
                     col_abstract = next((c for c in ['ABSTRACT', 'AB'] if c in df.columns), None)
                     if col_abstract and pd.notna(doc[col_abstract]):
                         with st.expander("Ler Resumo (Abstract)"):
                             st.write(doc[col_abstract])
                             
-                elif tipo_ativo == "Autor":
-                    docs_autor = filtrar_por_entidade(df, termo_ativo, "Autor")
-                    total_citacoes = docs_autor['TOTAL CITATIONS'].sum() if 'TOTAL CITATIONS' in docs_autor.columns else 0
-                    st.write(f"**Impacto Total (Citações):** {total_citacoes}")
+                elif tipo_ativo in ["Autor", "País", "Local de Publicação (Venue)", "Tema", "Palavra-chave"]:
+                    docs, cits, h, g, i10, m = calcular_metricas_perfil(subset_df)
+                    st.write(f"**Impacto Total:** {cits} citações em {docs} documentos")
+                    st.markdown(f"**Índices:** `h: {h}` | `g: {g}` | `i10: {i10}` | `m: {m}`")
                     
-                    mostrar_ql_perfil(docs_autor, df) # INJETANDO O QL
-                                        
-                    # Coautores
-                    parceiros = []
-                    for _, r in docs_autor.iterrows():
-                        if pd.notna(r[col_autores]):
-                            parceiros.extend([a.strip() for a in str(r[col_autores]).split(';') if a.strip() and a.strip() != termo_ativo])
-                    top_parceiros = Counter(parceiros).most_common(5)
+                    mostrar_botoes_keywords(subset_df)
                     
-                    if top_parceiros:
-                        st.write("**🤝 Principais Coautores (clique para ver perfil):**")
-                        for i, (p, qtd) in enumerate(top_parceiros):
-                            st.button(f"🤝 {p} ({qtd} docs)", key=f"btn_nav_coaut_{hash(p)}_{i}", on_click=navegar_busca, args=("Autor", p))
-                    
-                    with st.expander(f"📚 Documentos Publicados ({len(docs_autor)})"):
-                        for i, (_, r) in enumerate(docs_autor.iterrows()):
+                    # Exibe a Nova Tabela de Associações Universais
+                    gerar_tabela_associacoes(subset_df, df, tipo_ativo)
+
+                    with st.expander(f"📚 Ver Documentos ({len(subset_df)})"):
+                        for i, (_, r) in enumerate(subset_df.iterrows()):
                             titulo_doc = r[col_titulos]
-                            st.button(f"📄 {titulo_doc} ({r.get(col_ano, 'N/A')})", key=f"btn_nav_doc_aut_{hash(titulo_doc)}_{i}", on_click=navegar_busca, args=("Documento", titulo_doc))
-
-                elif tipo_ativo == "País":
-                    docs_pais = filtrar_por_entidade(df, termo_ativo, "País")
-                    total_citacoes = docs_pais['TOTAL CITATIONS'].sum() if 'TOTAL CITATIONS' in docs_pais.columns else 0
-                    st.write(f"**Impacto do País (Citações):** {total_citacoes}")
-
-                    mostrar_ql_perfil(docs_pais, df)
-                    
-                    with st.expander(f"📚 Ver Documentos Associados ({len(docs_pais)})"):
-                        for i, (_, r) in enumerate(docs_pais.iterrows()):
-                            titulo_doc = r[col_titulos]
-                            st.button(f"📄 {titulo_doc}", key=f"btn_nav_doc_pais_{hash(titulo_doc)}_{i}", on_click=navegar_busca, args=("Documento", titulo_doc))
-
-                elif tipo_ativo == "Local de Publicação (Venue)":
-                    docs_venue = filtrar_por_entidade(df, termo_ativo, "Local de Publicação (Venue)")
-                    total_citacoes = docs_venue['TOTAL CITATIONS'].sum() if 'TOTAL CITATIONS' in docs_venue.columns else 0
-                    st.write(f"**Citações Acumuladas nesta Fonte:** {total_citacoes}")
-
-                    mostrar_ql_perfil(docs_venue, df)
-                    
-                    with st.expander(f"📚 Ver Documentos Publicados Aqui ({len(docs_venue)})"):
-                        for i, (_, r) in enumerate(docs_venue.iterrows()):
-                            titulo_doc = r[col_titulos]
-                            st.button(f"📄 {titulo_doc}", key=f"btn_nav_doc_venue_{hash(titulo_doc)}_{i}", on_click=navegar_busca, args=("Documento", titulo_doc))
-                
-                elif tipo_ativo == "Tema":
-                    docs_tema = filtrar_por_entidade(df, termo_ativo, "Tema")
-                    total_citacoes = docs_tema['TOTAL CITATIONS'].sum() if 'TOTAL CITATIONS' in docs_tema.columns else 0
-                    st.write(f"**Impacto Total desta Escola de Pesquisa (Citações):** {total_citacoes}")
-
-                    # Como o usuário quer ver o QL aqui também:
-                    st.markdown("**🎯 Lideranças e Especialistas neste Tema:**")
-
-                    mostrar_liderancas_tema(termo_ativo, df)
-
-                    with st.expander(f"📚 Ver Documentos desta Escola ({len(docs_tema)})"):
-                        for i, (_, r) in enumerate(docs_tema.iterrows()):
-                            titulo_doc = r[col_titulos]
-                            st.button(f"📄 {titulo_doc}", key=f"btn_nav_doc_tema_{hash(titulo_doc)}_{i}", on_click=navegar_busca, args=("Documento", titulo_doc))
+                            st.button(f"📄 {titulo_doc} ({r.get(col_ano, 'N/A')})", key=f"btn_nav_doc_{tipo_ativo}_{hash(titulo_doc)}_{i}", on_click=navegar_busca, args=("Documento", titulo_doc))
 
             # =========================================================
             # ABAS DO DOSSIÊ (HISTÓRICO, NUVEM E SIMILARES)
             # =========================================================
             tab_hist, tab_nuvem, tab_similares = st.tabs(["📈 Evolução Histórica", "☁️ Lexicometria", "🔗 Itens Semelhantes"])
 
-            subset_df = filtrar_por_entidade(df, termo_ativo, tipo_ativo)
-
             # --- ABA 1: HISTÓRICO AVANÇADO ---
             with tab_hist:
                 st.markdown(f"**Produção e Impacto ao Longo do Tempo**")
-                
-                nomes_comuns_tipo = [
-                    'TYPE', 'DT', 'DOCUMENT TYPE', 'TY', 'TIPO', 
-                    'TIPO DE DOCUMENTO', 'TYPE OF REFERENCE', 'REFERENCE TYPE'
-                ]
-                
+                nomes_comuns_tipo = ['TYPE', 'DT', 'DOCUMENT TYPE', 'TY', 'TIPO', 'TIPO DE DOCUMENTO', 'TYPE OF REFERENCE', 'REFERENCE TYPE']
                 col_tipo_doc = next((c for c in df.columns if str(c).strip().upper() in nomes_comuns_tipo), None)
                 
                 opcoes_visao = ["Visão Geral"]
-                if col_tipo_doc: 
-                    opcoes_visao.append("Separado por Tipo de Documento")
-                if 'TEMA_GEMINI' in df.columns:
-                    opcoes_visao.append("Separado por Temas") # Nova Opção
+                if col_tipo_doc: opcoes_visao.append("Separado por Tipo de Documento")
+                if 'TEMA_GEMINI' in df.columns: opcoes_visao.append("Separado por Temas") 
 
-                visao_hist = st.radio(
-                    "Análise Histórica:", 
-                    opcoes_visao, 
-                    horizontal=True, 
-                    key=f"rad_hist_{hash(termo_ativo)}"
-                )
+                visao_hist = st.radio("Análise Histórica:", opcoes_visao, horizontal=True, key=f"rad_hist_{hash(termo_ativo)}")
                 
                 if col_ano and not subset_df.empty:
                     df_ano = subset_df.copy()
@@ -2052,7 +2070,6 @@ if st.session_state['df_geral'] is not None:
                     df_ano = df_ano.dropna(subset=[col_ano])
                     
                     if not df_ano.empty:
-                    
                         if visao_hist == "Visão Geral":
                             if 'TOTAL CITATIONS' in df_ano.columns:
                                 hist_data = df_ano.groupby(col_ano).agg(Volume=(col_titulos, 'count'), Citacoes=('TOTAL CITATIONS', 'sum')).reset_index()
@@ -2060,9 +2077,7 @@ if st.session_state['df_geral'] is not None:
                                 hist_data = df_ano.groupby(col_ano).size().reset_index(name='Volume')
                                 hist_data['Citacoes'] = 0
                                 
-                            # CORREÇÃO ARROW: Forçamos o tipo Inteiro para Volume para impedir o colapso do PyArrow
                             hist_data['Volume'] = pd.to_numeric(hist_data['Volume'], errors='coerce').fillna(0).astype(int)
-                                
                             fig_hist = go.Figure()
                             fig_hist.add_trace(go.Bar(x=hist_data[col_ano], y=hist_data['Volume'], name="Documentos", marker_color="#2a9d8f"))
                             fig_hist.add_trace(go.Scatter(x=hist_data[col_ano], y=hist_data['Citacoes'], name="Citações", mode='lines+markers', yaxis='y2', line=dict(color="#e76f51", width=3)))
@@ -2077,10 +2092,7 @@ if st.session_state['df_geral'] is not None:
                         elif visao_hist == "Separado por Tipo de Documento":
                             df_ano[col_tipo_doc] = df_ano[col_tipo_doc].fillna("Desconhecido")
                             hist_data = df_ano.groupby([col_ano, col_tipo_doc]).size().reset_index(name='Volume')
-                            
-                            # CORREÇÃO ARROW: Forçamos o tipo Inteiro para Volume 
                             hist_data['Volume'] = pd.to_numeric(hist_data['Volume'], errors='coerce').fillna(0).astype(int)
-                            
                             fig_hist = px.bar(hist_data, x=col_ano, y='Volume', color=col_tipo_doc, title="Volume de Documentos por Tipo e Ano", template="plotly_white")
                             fig_hist.update_layout(xaxis=dict(tickmode='linear', dtick=1))
                             st.plotly_chart(fig_hist, width='stretch')
@@ -2088,45 +2100,29 @@ if st.session_state['df_geral'] is not None:
                             df_ano['TEMA_GEMINI'] = df_ano['TEMA_GEMINI'].fillna("Não Categorizado")
                             hist_data = df_ano.groupby([col_ano, 'TEMA_GEMINI']).size().reset_index(name='Volume')
                             hist_data['Volume'] = pd.to_numeric(hist_data['Volume'], errors='coerce').fillna(0).astype(int)
-
-                            fig_hist = px.bar(
-                                hist_data, x=col_ano, y='Volume', color='TEMA_GEMINI', 
-                                title=f"Evolução Temporal: {termo_ativo}", 
-                                template="plotly_white",
-                                color_discrete_sequence=px.colors.qualitative.Pastel
-                            )
+                            fig_hist = px.bar(hist_data, x=col_ano, y='Volume', color='TEMA_GEMINI', title=f"Evolução Temporal: {termo_ativo}", template="plotly_white", color_discrete_sequence=px.colors.qualitative.Pastel)
                             fig_hist.update_layout(xaxis=dict(tickmode='linear', dtick=1))
                             st.plotly_chart(fig_hist, width='stretch')
-                    else:
-                        st.info("Não há dados temporais válidos para gerar o histórico.")
-                else:
-                    st.info("A coluna de Ano não está disponível para esta análise.")
+                    else: st.info("Não há dados temporais válidos para gerar o histórico.")
+                else: st.info("A coluna de Ano não está disponível para esta análise.")
 
             # --- ABA 2: NUVEM DE PALAVRAS CUSTOMIZÁVEL ---
             with tab_nuvem:
                 st.markdown(f"**Assinatura Semântica do Perfil**")
-                
                 c1, c2, c3 = st.columns(3)
-                with c1:
-                    fonte_txt = st.selectbox("Composição do Texto:", ["Tudo Combinado", "Apenas Títulos", "Apenas Palavras-chave", "Apenas Resumo"], key=f"src_wc_{hash(termo_ativo)}")
-                with c2:
-                    estilo_txt = st.selectbox("Tipografia:", ["Arial", "Verdana", "Courier New", "Georgia", "Impact", "Trebuchet MS"], key=f"font_wc_{hash(termo_ativo)}")
-                with c3:
-                    tema_cor = st.selectbox("Paleta:", ["Oceano", "Fogo", "Floresta", "Cyberpunk", "Acadêmico"], index=4, key=f"pal_wc_{hash(termo_ativo)}")
+                with c1: fonte_txt = st.selectbox("Composição do Texto:", ["Tudo Combinado", "Apenas Títulos", "Apenas Palavras-chave", "Apenas Resumo"], key=f"src_wc_{hash(termo_ativo)}")
+                with c2: estilo_txt = st.selectbox("Tipografia:", ["Arial", "Verdana", "Courier New", "Georgia", "Impact", "Trebuchet MS"], key=f"font_wc_{hash(termo_ativo)}")
+                with c3: tema_cor = st.selectbox("Paleta:", ["Oceano", "Fogo", "Floresta", "Cyberpunk", "Acadêmico"], index=4, key=f"pal_wc_{hash(termo_ativo)}")
                     
                 paletas_dict = {
-                    "Oceano": ["#0077b6", "#00b4d8", "#90e0ef", "#03045e", "#023e8a"],
-                    "Fogo": ["#ff4d00", "#ff8c00", "#ff0000", "#fad02c", "#e85d04"],
-                    "Floresta": ["#2d6a4f", "#40916c", "#1b4332", "#74c69d", "#95d5b2"],
-                    "Cyberpunk": ["#f72585", "#7209b7", "#3a0ca3", "#4361ee", "#4cc9f0"],
+                    "Oceano": ["#0077b6", "#00b4d8", "#90e0ef", "#03045e", "#023e8a"], "Fogo": ["#ff4d00", "#ff8c00", "#ff0000", "#fad02c", "#e85d04"],
+                    "Floresta": ["#2d6a4f", "#40916c", "#1b4332", "#74c69d", "#95d5b2"], "Cyberpunk": ["#f72585", "#7209b7", "#3a0ca3", "#4361ee", "#4cc9f0"],
                     "Acadêmico": ["#264653", "#2a9d8f", "#e9c46a", "#f4a261", "#e76f51"]
                 }
 
                 textos_para_juntar = []
                 col_ab = next((c for c in ['ABSTRACT', 'AB'] if c in df.columns), None)
-                col_kw = next((c for c in ['KEYWORDS', 'KW', 'DE'] if c in df.columns), None)
                 
-                # CORREÇÃO 2: Verificamos se a coluna está em subset_df.columns antes de acessá-la
                 if ("Tudo" in fonte_txt or "Título" in fonte_txt) and col_titulos in subset_df.columns:
                     textos_para_juntar.append(" ".join(subset_df[col_titulos].dropna().astype(str)))
                 if ("Tudo" in fonte_txt or "Palavras-chave" in fonte_txt) and col_kw in subset_df.columns:
@@ -2135,23 +2131,12 @@ if st.session_state['df_geral'] is not None:
                     textos_para_juntar.append(" ".join(subset_df[col_ab].dropna().astype(str)))
 
                 texto_final_vetorizado = " ".join(textos_para_juntar)
-                
                 subset_df_wc = pd.DataFrame({'TEXTO_COMBINADO': [texto_final_vetorizado]})
 
                 with st.spinner("Gerando nuvem de palavras específica..."):
-                  
-                    
-                    wc_opcoes = gerar_nuvem_echarts(
-                        subset_df_wc, 
-                        coluna='TEXTO_COMBINADO', 
-                        fonte=estilo_txt, 
-                        paleta=paletas_dict[tema_cor]
-                    )
-                    
-                    if wc_opcoes:
-                        st_echarts(options=wc_opcoes, height="450px", key=f"wc_{hash(termo_ativo)}_{fonte_txt}_{tema_cor}")
-                    else:
-                        st.warning("Texto insuficiente nos documentos desta entidade para gerar a nuvem semântica.")
+                    wc_opcoes = gerar_nuvem_echarts(subset_df_wc, coluna='TEXTO_COMBINADO', fonte=estilo_txt, paleta=paletas_dict[tema_cor])
+                    if wc_opcoes: st_echarts(options=wc_opcoes, height="450px", key=f"wc_{hash(termo_ativo)}_{fonte_txt}_{tema_cor}")
+                    else: st.warning("Texto insuficiente nos documentos desta entidade para gerar a nuvem semântica.")
 
             # --- ABA 3: CÁLCULO DE SIMILARIDADE ---
             with tab_similares:
@@ -2165,26 +2150,16 @@ if st.session_state['df_geral'] is not None:
                     if not lista_dados:
                         st.info(f"Nenhum item com forte correlação encontrado.")
                         return
-                        
                     df_sim = pd.DataFrame(lista_dados)[['Item', 'Similaridade (%)', 'Traços em Comum']]
                     df_sim = df_sim.rename(columns={'Item': titulo_coluna_item})
-                    
-                    st.dataframe(
-                        df_sim, 
-                        hide_index=True, 
-                        width='stretch',
-                        column_config={
-                            "Similaridade (%)": st.column_config.ProgressColumn("Similaridade (%)", min_value=0, max_value=100, format="%.1f%%")
-                        }
-                    )
-                    
+                    st.dataframe(df_sim, hide_index=True, width='stretch', column_config={"Similaridade (%)": st.column_config.ProgressColumn("Similaridade (%)", min_value=0, max_value=100, format="%.1f%%")})
                     with st.expander(f"Navegar para os perfis ({titulo_coluna_item})"):
                         for idx, row in df_sim.iterrows():
                             item_nome = row[titulo_coluna_item]
                             st.button(f"Ir para: {item_nome}", key=f"btn_sim_{tipo_nav}_{hash(item_nome)}_{idx}", on_click=navegar_busca, args=(tipo_nav, item_nome))
 
                 if not similares or all(len(v) == 0 for v in similares.values()):
-                    st.warning("Este item possui conexões muito isoladas do resto do sistema para que vizinhos próximos sejam calculados com precisão.")
+                    st.warning("Este item possui conexões muito isoladas para que vizinhos próximos sejam calculados com precisão.")
                 else:
                     if tipo_ativo == 'Documento':
                         st.markdown("##### 📄 Documentos Semelhantes")
@@ -2192,10 +2167,10 @@ if st.session_state['df_geral'] is not None:
                     elif tipo_ativo == 'Autor':
                         st.markdown("##### ✍️ Autores com Perfil Semelhante")
                         render_tabela_similares(similares.get('Autores', []), "Autor", "Autor")
-                    elif tipo_ativo in ['País', 'Local de Publicação (Venue)']:
+                    elif tipo_ativo in ['País', 'Local de Publicação (Venue)', 'Palavra-chave', 'Tema']:
                         st.markdown(f"##### 🔗 Entidades Semelhantes ({tipo_ativo})")
                         render_tabela_similares(similares.get('Itens', []), tipo_ativo, tipo_ativo)
-    
+  
     # =========================================================
     # --- ABA 4: ASSISTENTE CIENTÍFICO (CHATBOT) ---
     # =========================================================
@@ -2397,7 +2372,7 @@ if st.session_state['df_geral'] is not None:
                     url_planilha = st.secrets["connections"]["gsheets"]["spreadsheet"]
                     conn = st.connection("gsheets", type=GSheetsConnection)
                     
-                    with st.spinner("Registrando avaliação no banco de dados..."):
+                    with st.spinner("⚙️ Por favor, aguarde. Registrando avaliação no banco de dados..."):
                         nome_aba_planilha = "Respostas" 
                         
                         df_existente = conn.read(spreadsheet=url_planilha, worksheet=nome_aba_planilha, ttl=0)
